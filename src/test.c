@@ -131,6 +131,83 @@ static void print_usage(const char *program_name) {
             program_name, program_name);
 }
 
+/* Step 2 */
+void put_vertices_to_file(char *grammar, char *graph, GrB_Index *reachable, GrB_Index reachable_count) {
+    char *grammar_name = strrchr(grammar, '/');
+    size_t grammar_name_size = strlen(grammar_name) -4; // remove extension .cnf 
+    
+    char *graph_name = strrchr(graph, '/');
+    size_t graph_name_size = strlen(graph_name) -2; // remove extension .g 
+    
+    size_t n = strlen("./computated_data") + grammar_name_size + graph_name_size + 1;
+    
+    char *filename = (char *)calloc(n,sizeof(char));
+    
+    strcat(filename, "./computated_data");
+    strncat(filename, grammar_name, grammar_name_size);
+    strncat(filename, graph_name, graph_name_size);
+    printf("debug: creating file %s\n", filename);
+
+    FILE *file = fopen(filename, "wb");
+    if (!file) {
+        fprintf(stderr, "error: failed to open file.");
+        abort();
+    }
+    /*char number[20];
+    memset(number, 0, 20);
+    sprintf(number, "%zu", reachable_count);
+    fwrite(number, strlen(number) * sizeof(char), 1, file);
+    fwrite("\n", strlen("\n") * sizeof(char), 1, file);
+
+    for (int i = 0; i < reachable_count; ++i) {
+        memset(number, 0, 20);
+        sprintf(number, "%zu", reachable[i]);
+        fwrite(number, strlen(number) * sizeof(char), 1, file);
+        fwrite(" ", strlen("\n") * sizeof(char), 1, file);
+    }
+    fwrite("\n", strlen("\n") * sizeof(char), 1, file);*/
+    fwrite(&reachable_count, sizeof(GrB_Index), 1, file);
+    fwrite(reachable, sizeof(GrB_Index), reachable_count, file);
+
+    fclose(file);
+}
+
+void get_vertices_from_file(char *grammar, char *graph, GrB_Index **reachable, GrB_Index *reachable_count) {
+    char *grammar_name = strrchr(grammar, '/');
+    size_t grammar_name_size = strlen(grammar_name) -4; // remove extension .cnf 
+    
+    char *graph_name = strrchr(graph, '/');
+    size_t graph_name_size = strlen(graph_name) -2; // remove extension .g 
+    
+    size_t n = strlen("./computated_data") + grammar_name_size + graph_name_size + 1;
+    
+    char *filename = (char *)calloc(n,sizeof(char));
+    
+    strcat(filename, "./computated_data");
+    strncat(filename, grammar_name, grammar_name_size);
+    strncat(filename, graph_name, graph_name_size);
+    printf("debug: reading file %s...\n", filename);
+
+    FILE *file = fopen(filename, "rb");
+    if (!file) {
+        fprintf(stderr, "error: failed to open file.");
+        abort();
+    }
+    fread(reachable_count, sizeof(GrB_Index), 1, file);
+    printf("debug: reachable_count = %zu\n", *reachable_count);
+
+    *reachable = (GrB_Index *)malloc(*reachable_count * sizeof(GrB_Index));
+    GrB_Index num = *reachable_count;
+
+    size_t retval = fread(*reachable, sizeof(GrB_Index), num, file);
+    if (retval != num) {
+        printf("debug: fread failed. retval = %zu\n", retval);
+    }
+
+    fclose(file);
+}
+/* Step 2 */
+
 int main(int argc, char **argv) {
     GrB_Info retval = GrB_SUCCESS;
     int8_t optimizations = 0;
@@ -272,6 +349,15 @@ int main(int argc, char **argv) {
         TRY(adv_adapter.free_outputs());
         TRY(adv_adapter.cleanup());
         /* Step 1 end. */
+
+        /* Step 2 start. Save start_vertices to the files. */
+        printf("debug: write to file |reachable| = %zu\n", reachable_count);
+        put_vertices_to_file(config.grammar, config.graph, reachable, reachable_count);
+        free(reachable);
+        reachable_count = 0;
+        get_vertices_from_file(config.grammar, config.graph, &reachable, &reachable_count);
+        printf("debug: read from file |reachable| = %zu\n", reachable_count);
+        /* Step 2 end. */
 
         bool is_hot = is_hot_enabled;
 

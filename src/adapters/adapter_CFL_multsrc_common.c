@@ -66,6 +66,11 @@ GrB_Info adapter_CFL_init_src_nodes_common(GrB_Index **srcs, size_t *source_coun
     }
 
     GrB_Index *pool = malloc(reachable_count * sizeof(GrB_Index));
+    if (!pool) {
+        fprintf(stderr, "out of memory\n");
+        abort();
+    }
+    memcpy(pool, reachable_pool, reachable_count * sizeof(GrB_Index));
 
     *source_count = (fixed_random_count < reachable_count) ? fixed_random_count : reachable_count;
     *srcs = malloc(*source_count * sizeof(GrB_Index));

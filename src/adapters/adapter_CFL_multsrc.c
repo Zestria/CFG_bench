@@ -43,11 +43,12 @@ static GrB_Info adapter_CFL_setup(void) {
 //
 // adapter_CFL_prepare should be called just once for each config
 static GrB_Info adapter_CFL_prepare(ParserResult parser_result, void *prepare_data) {
-    (void)prepare_data;
+    CFL_multsrc_PrepareData *cfg = (CFL_multsrc_PrepareData *)prepare_data;
     TRY(adapter_CFL_prepare_common(parser_result, &state.adj_matrices, &state.terms_count, &state.nonterms_count,
                                    &state.rules, &state.rules_count, &state.graph_size));
 
-    adapter_CFL_init_src_nodes_common(&state.srcs, &state.source_count, 0);
+    adapter_CFL_init_src_nodes_common(&state.srcs, &state.source_count, state.graph_size, cfg->reachable_srcs,
+                                      cfg->reachable_count, cfg->seed, cfg->fixed_random_count);
 
     return GrB_SUCCESS;
 }

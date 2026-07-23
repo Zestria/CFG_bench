@@ -158,8 +158,8 @@ static GrB_Info adapter_CFL_all_path_adv_init_outputs() {
 //
 // this should be called after adapter_CFL_all_path_adv_init_outputs
 static GrB_Info adapter_CFL_all_path_adv_run() {
-    TRY(LAGraph_CFL_AllPaths_adv(state.outputs, &state.all_path_type, state.adj_matrices, state.symbols_amount, state.rules,
-                                     state.rules_count, state.msg, state.optimizations));
+    TRY(LAGraph_CFL_AllPaths_adv(state.outputs, &state.all_path_type, state.adj_matrices, state.symbols_amount,
+                                 state.rules, state.rules_count, state.msg, state.optimizations));
 
     return GrB_SUCCESS;
 }

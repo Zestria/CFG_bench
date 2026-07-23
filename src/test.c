@@ -2,9 +2,10 @@
 #include "adapter_CFL_CFPQ_RSM.h"
 #include "adapter_CFL_adv.h"
 #include "adapter_CFL_all_path.h"
-#include "adapter_CFL_multsrc.h"
-#include "adapter_CFL_single_path.h"
 #include "adapter_CFL_all_path_adv.h"
+#include "adapter_CFL_multsrc.h"
+#include "adapter_CFL_multsrc_common.h"
+#include "adapter_CFL_single_path.h"
 #include "memory.h"
 #include "parser.h"
 #include "result_manager.h"
@@ -112,7 +113,8 @@ static void print_usage(const char *program_name) {
             "  -r <rounds>       Number of benchmark rounds (default: 10)\n"
             "  --hot             Enable HOT launch (warm-up run before measurements)\n"
             "  -a <algorithm>    Algorithm to use "
-            "(default: CFL_adv; options: CFL_adv, CFL, CFL_single_path, CFL_all_path, CFL_all_path_adv, CFL_CFPQ_RSM, CFL_multsrc)\n"
+            "(default: CFL_adv; options: CFL_adv, CFL, CFL_single_path, CFL_all_path, CFL_all_path_adv, CFL_CFPQ_RSM, "
+            "CFL_multsrc)\n"
             "\n"
             "Optimization flags:\n"
             "  -e                Enable empty optimization\n"
@@ -140,6 +142,11 @@ int main(int argc, char **argv) {
     bool is_algo_chosen = false;
     char *input_config = NULL;
     size_t rounds_count = 10;
+
+    /* Step 2 */
+    const size_t source_sizes[] = {1, 10, 100, 0};
+    const size_t seeds[] = {2430986565, 1859447115, 694443915, 831769172, 2376066489, 0};
+    /* Step 2 */
 
     AdapterMethods adapter = {0};
 
@@ -219,6 +226,12 @@ int main(int argc, char **argv) {
 
     TRY(adapter.setup());
 
+    /* Step 1 */
+    AdapterMethods adv_adapter = {0};
+    adv_adapter = adapter_CFL_adv_get_methods();
+    TRY(adv_adapter.setup());
+    /* Step 1 */
+
     if (!is_config) {
         fprintf(stderr, "Need to choose config by flag -c [config file]\n");
         exit(EXIT_FAILURE);
@@ -233,115 +246,146 @@ int main(int argc, char **argv) {
     fflush(stdout);
 
     for (size_t i = 0; i < configs_count; i++) {
-        double *start = calloc(rounds_count, sizeof(double));
-        double *end = calloc(rounds_count, sizeof(double));
-        if (start == NULL || end == NULL) {
-            fprintf(stderr, "Failed to allocate memory for benchmark rounds\n");
-            free(start);
-            free(end);
-            exit(EXIT_FAILURE);
-        }
-
         config_row config = configs[i];
         printf("CONFIG: grammar: %s, graph: %s\n", config.grammar, config.graph);
         fflush(stdout);
 
-        ParserResult parser_result = parser(config);
-        adapter.prepare(parser_result, &(CFL_adv_PrepareData){.optimizations = optimizations});
+        /* Step 1 start. Run CFL_adv to get reachable vertices */
+        ParserResult parser_result_adv = parser(config);
+        adv_adapter.prepare(parser_result_adv, &(CFL_adv_PrepareData){.optimizations = optimizations});
+
+        TRY(adv_adapter.init_outputs());
+
+        malloc_trim(0);
+        if (mem_peak_reset() != 0) {
+            fprintf(stderr, "Failed to reset memory peak\n");
+            exit(EXIT_FAILURE);
+        }
+
+        retval = adv_adapter.run();
+
+        GrB_Index *reachable = NULL;
+        size_t reachable_count = 0;
+        TRY(extract_reachable_sources(adv_state_get_outputs(), 0, adv_state_get_graph_size(), &reachable,
+                                      &reachable_count));
+
+        TRY(adv_adapter.free_outputs());
+        TRY(adv_adapter.cleanup());
+        /* Step 1 end. */
 
         bool is_hot = is_hot_enabled;
 
-        size_t result = 0;
-        ssize_t max_memory_kb = 0;
-        for (size_t i = 0; i < rounds_count; i++) {
-            TRY(adapter.init_outputs());
+        for (size_t i = 0; source_sizes[i] != 0; ++i) {
+            for (size_t j = 0; seeds[j] != 0; ++j) {
+                ParserResult parser_result = parser(config);
+                adapter.prepare(parser_result, &(CFL_multsrc_PrepareData){.optimizations = optimizations,
+                                                                          .reachable_srcs = reachable,
+                                                                          .reachable_count = reachable_count,
+                                                                          .seed = seeds[j],
+                                                                          .fixed_random_count = source_sizes[i]});
 
-            // in some cases free don't change memory usage, so we need to reset it manually
-            malloc_trim(0);
-            if (mem_peak_reset() != 0) {
-                fprintf(stderr, "Failed to reset memory peak\n");
-                exit(EXIT_FAILURE);
-            }
+                double *start = calloc(rounds_count, sizeof(double));
+                double *end = calloc(rounds_count, sizeof(double));
+                if (start == NULL || end == NULL) {
+                    fprintf(stderr, "Failed to allocate memory for benchmark rounds\n");
+                    free(start);
+                    free(end);
+                    exit(EXIT_FAILURE);
+                }
+                size_t result = 0;
+                ssize_t max_memory_kb = 0;
+                for (size_t i = 0; i < rounds_count; i++) {
+                    TRY(adapter.init_outputs());
 
-            start[i] = LAGraph_WallClockTime();
+                    // in some cases free don't change memory usage, so we need to reset it manually
+                    malloc_trim(0);
+                    if (mem_peak_reset() != 0) {
+                        fprintf(stderr, "Failed to reset memory peak\n");
+                        exit(EXIT_FAILURE);
+                    }
+
+                    start[i] = LAGraph_WallClockTime();
 #ifndef CI
-            retval = adapter.run();
+                    retval = adapter.run();
 #endif
-            end[i] = LAGraph_WallClockTime();
-            max_memory_kb = mem_get_peak_kb();
+                    end[i] = LAGraph_WallClockTime();
+                    max_memory_kb = mem_get_peak_kb();
 
-            if (is_test) {
-                size_t result = adapter.get_result();
-                ResultType result_type = adapter.is_result_valid(config.valid_result);
-                char status[256];
-                switch (result_type) {
-                case RESULT_OK:
-                    snprintf(status, sizeof(status), GREEN "[OK]" RESET);
-                    break;
-                case RESULT_ERROR:
-                    snprintf(status, sizeof(status), RED "[Wrong] (Result must be %ld)" RESET, config.valid_result);
-                    break;
-                case RESULT_UNKNOWN:
-                    snprintf(status, sizeof(status), YELLOW "[Unknown]" RESET);
-                    break;
-                default:
-                    fprintf(stderr, "Unknown result type: %d\n", result_type);
-                    abort();
+                    if (is_test) {
+                        size_t result = adapter.get_result();
+                        ResultType result_type = adapter.is_result_valid(config.valid_result);
+                        char status[256];
+                        switch (result_type) {
+                        case RESULT_OK:
+                            snprintf(status, sizeof(status), GREEN "[OK]" RESET);
+                            break;
+                        case RESULT_ERROR:
+                            snprintf(status, sizeof(status), RED "[Wrong] (Result must be %ld)" RESET,
+                                     config.valid_result);
+                            break;
+                        case RESULT_UNKNOWN:
+                            snprintf(status, sizeof(status), YELLOW "[Unknown]" RESET);
+                            break;
+                        default:
+                            fprintf(stderr, "Unknown result type: %d\n", result_type);
+                            abort();
+                        }
+
+                        printf("\tResult: %ld (Return code: %d) %s", result, retval, status);
+
+                        if (retval != 0) {
+                            printf("\t(MSG: %s)", msg);
+                        }
+                        printf(" (%.4f sec)", end[i] - start[i]);
+
+                        TRY(adapter.free_outputs());
+                        break;
+                    }
+
+                    if (is_hot) {
+                        is_hot = false;
+                        i--;
+                        TRY(adapter.free_outputs());
+                        continue;
+                    }
+
+                    printf("\t%.3fs", end[i] - start[i]);
+                    fflush(stdout);
+
+                    result = adapter.get_result();
+                    TRY(adapter.free_outputs());
+                    save_result(algo, config.grammar, config.graph, result, max_memory_kb,
+                                (size_t)((end[i] - start[i]) * 1000));
+                    // in some cases free don't change memory usage, so we need to reset it manually
+                    malloc_trim(0);
+                }
+                printf("\n");
+
+                if (is_test) {
+                    free(start);
+                    free(end);
+                    adapter.cleanup();
+
+                    fflush(stdout);
+                    continue;
                 }
 
-                printf("\tResult: %ld (Return code: %d) %s", result, retval, status);
-
-                if (retval != 0) {
-                    printf("\t(MSG: %s)", msg);
+                double sum = 0;
+                for (size_t i = 0; i < rounds_count; i++) {
+                    sum += end[i] - start[i];
                 }
-                printf(" (%.4f sec)", end[i] - start[i]);
+                printf("\tTime elapsed (avg): %.6f seconds. %zd KB max memory. Result: %ld (return code "
+                       "%d) (%s)\n\n",
+                       sum / rounds_count, max_memory_kb, result, retval, msg);
 
-                TRY(adapter.free_outputs());
-                break;
+                free(start);
+                free(end);
+
+                TRY(adapter.cleanup());
+
+                fflush(stdout);
             }
-
-            if (is_hot) {
-                is_hot = false;
-                i--;
-                TRY(adapter.free_outputs());
-                continue;
-            }
-
-            printf("\t%.3fs", end[i] - start[i]);
-            fflush(stdout);
-
-            result = adapter.get_result();
-            TRY(adapter.free_outputs());
-            save_result(algo, config.grammar, config.graph, result, max_memory_kb,
-                        (size_t)((end[i] - start[i]) * 1000));
-            // in some cases free don't change memory usage, so we need to reset it manually
-            malloc_trim(0);
         }
-        printf("\n");
-
-        if (is_test) {
-            free(start);
-            free(end);
-            adapter.cleanup();
-
-            fflush(stdout);
-            continue;
-        }
-
-        double sum = 0;
-        for (size_t i = 0; i < rounds_count; i++) {
-            sum += end[i] - start[i];
-        }
-        printf("\tTime elapsed (avg): %.6f seconds. %zd KB max memory. Result: %ld (return code "
-               "%d) (%s)\n\n",
-               sum / rounds_count, max_memory_kb, result, retval, msg);
-
-        free(start);
-        free(end);
-
-        TRY(adapter.cleanup());
-
-        fflush(stdout);
     }
 
     free(configs);

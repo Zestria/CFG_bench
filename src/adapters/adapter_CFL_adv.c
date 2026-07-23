@@ -68,10 +68,7 @@ static GrB_Matrix *get_matrices_from_graph(Graph graph, size_t *map_base_indecie
 }
 
 // initialize LAGraph\GraphBLAS
-static GrB_Info adapter_CFL_adv_setup(void) {
-    TRY(LAGr_Init(GrB_NONBLOCKING, malloc, NULL, NULL, free, state.msg));
-    return GrB_SUCCESS;
-}
+static GrB_Info adapter_CFL_adv_setup(void) { return GrB_SUCCESS; }
 
 // inner structure to pass data to prepare function
 typedef CFL_adv_PrepareData PrepareData;
@@ -182,6 +179,12 @@ static size_t adapter_CFL_adv_get_result(void) {
     TRY(adapter_CFL_get_result_common(state.outputs[0], &result));
     return result;
 }
+
+/* Changes for step 1 */
+GrB_Matrix *adv_state_get_outputs() { return state.outputs; }
+
+GrB_Index adv_state_get_graph_size() { return state.graph_size; }
+/* Changes for step 1 */
 
 // free output matrices
 //

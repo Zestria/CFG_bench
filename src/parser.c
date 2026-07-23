@@ -3,17 +3,15 @@
 #include <LAGraphX.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))
 
-static int is_blank_line(const char *line) {
-    return line[strspn(line, " \t\r\n")] == '\0';
-}
+static int is_blank_line(const char *line) { return line[strspn(line, " \t\r\n")] == '\0'; }
 
 static int parse_size_token(const char *token, size_t *out) {
     char *end = NULL;

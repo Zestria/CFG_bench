@@ -43,7 +43,7 @@ static GrB_Info adapter_CFL_setup(void) {
 //
 // adapter_CFL_prepare should be called just once for each config
 static GrB_Info adapter_CFL_prepare(ParserResult parser_result, void *prepare_data) {
-    (void)prepare_data;
+    CFL_multsrc_PrepareData *cfg = (CFL_multsrc_PrepareData *)prepare_data;
     Grammar grammar = parser_result.grammar;
     Graph graph = parser_result.graph;
     SymbolList list = parser_result.symbols;
@@ -100,7 +100,7 @@ static GrB_Info adapter_CFL_prepare(ParserResult parser_result, void *prepare_da
     state.adj_matrices = prepared_adj_matrices;
     state.V = graph.node_count;
 
-    adapter_CFL_init_src_nodes_common(&state.sources, &state.sources_num, 0);
+    adapter_CFL_init_src_nodes_common(&state.sources, &state.sources_num, state.V, cfg->reachable_srcs, cfg->reachable_count, cfg->seed, cfg->fixed_random_count);
 
     free(row);
     free(col);

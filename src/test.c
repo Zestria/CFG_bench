@@ -146,7 +146,7 @@ void put_vertices_to_file(char *grammar, char *graph, GrB_Index *reachable, GrB_
     strcat(filename, "./computated_data");
     strncat(filename, grammar_name, grammar_name_size);
     strncat(filename, graph_name, graph_name_size);
-    printf("debug: creating file %s\n", filename);
+    // printf("debug: creating file %s\n", filename);
 
     FILE *file = fopen(filename, "wb");
     if (!file) {
@@ -171,8 +171,9 @@ void put_vertices_to_file(char *grammar, char *graph, GrB_Index *reachable, GrB_
 
     fclose(file);
 }
-
-void get_vertices_from_file(char *grammar, char *graph, GrB_Index **reachable, GrB_Index *reachable_count) {
+/* Step 2 */
+/* Step 3 */
+void get_vertices_from_file(char *grammar, char *graph, GrB_Index **reachable, size_t *reachable_count) {
     char *grammar_name = strrchr(grammar, '/');
     size_t grammar_name_size = strlen(grammar_name) -4; // remove extension .cnf 
     
@@ -186,27 +187,44 @@ void get_vertices_from_file(char *grammar, char *graph, GrB_Index **reachable, G
     strcat(filename, "./computated_data");
     strncat(filename, grammar_name, grammar_name_size);
     strncat(filename, graph_name, graph_name_size);
-    printf("debug: reading file %s...\n", filename);
+    // printf("debug: reading file %s...\n", filename);
 
     FILE *file = fopen(filename, "rb");
     if (!file) {
         fprintf(stderr, "error: failed to open file.");
         abort();
     }
-    fread(reachable_count, sizeof(GrB_Index), 1, file);
-    printf("debug: reachable_count = %zu\n", *reachable_count);
+    fread(reachable_count, sizeof(size_t), 1, file);
+    // printf("debug: reachable_count = %zu\n", *reachable_count);
 
     *reachable = (GrB_Index *)malloc(*reachable_count * sizeof(GrB_Index));
-    GrB_Index num = *reachable_count;
+    // printf("debug: reachable array size %zu\n",sizeof(*reachable));
 
-    size_t retval = fread(*reachable, sizeof(GrB_Index), num, file);
-    if (retval != num) {
-        printf("debug: fread failed. retval = %zu\n", retval);
+    size_t retval = fread(*reachable, sizeof(GrB_Index), *reachable_count, file);
+    // printf("debug: retval = %zu\n", retval);
+    if (retval != *reachable_count) {
+        printf("error: fread failed. retval = %zu\n", retval);
     }
 
     fclose(file);
 }
-/* Step 2 */
+
+#define SEED 2430986565
+
+void permute_elements(GrB_Index **reachable, size_t reachable_count) {
+    srand((unsigned int)SEED);
+    
+    for (size_t i = 0; i < reachable_count; ++i) {
+        size_t j = i + rand() % (reachable_count - i);
+        if (j >= reachable_count) {
+            printf("error: segfault\n");
+        }
+        GrB_Index temp = (*reachable)[i];
+        (*reachable)[i] = (*reachable)[j];
+        (*reachable)[j] = temp;
+    }
+}
+/* Step 3 */
 
 int main(int argc, char **argv) {
     GrB_Info retval = GrB_SUCCESS;
@@ -221,8 +239,8 @@ int main(int argc, char **argv) {
     size_t rounds_count = 10;
 
     /* Step 2 */
-    const size_t source_sizes[] = {1, 10, 100, 0};
-    const size_t seeds[] = {2430986565, 1859447115, 694443915, 831769172, 2376066489, 0};
+    const size_t source_sizes[] = {100, 0};
+    //const size_t seeds[] = {2430986565, 1859447115, 694443915, 831769172, 2376066489, 0};
     /* Step 2 */
 
     AdapterMethods adapter = {0};
@@ -327,7 +345,11 @@ int main(int argc, char **argv) {
         printf("CONFIG: grammar: %s, graph: %s\n", config.grammar, config.graph);
         fflush(stdout);
 
+        GrB_Index *reachable = NULL;
+        size_t reachable_count = 0;
+
         /* Step 1 start. Run CFL_adv to get reachable vertices */
+/*
         ParserResult parser_result_adv = parser(config);
         adv_adapter.prepare(parser_result_adv, &(CFL_adv_PrepareData){.optimizations = optimizations});
 
@@ -341,34 +363,49 @@ int main(int argc, char **argv) {
 
         retval = adv_adapter.run();
 
-        GrB_Index *reachable = NULL;
-        size_t reachable_count = 0;
         TRY(extract_reachable_sources(adv_state_get_outputs(), 0, adv_state_get_graph_size(), &reachable,
                                       &reachable_count));
 
         TRY(adv_adapter.free_outputs());
         TRY(adv_adapter.cleanup());
+*/
         /* Step 1 end. */
 
-        /* Step 2 start. Save start_vertices to the files. */
+        /* Step 2 start. Save start_vertices to the file. */
+/*
         printf("debug: write to file |reachable| = %zu\n", reachable_count);
         put_vertices_to_file(config.grammar, config.graph, reachable, reachable_count);
         free(reachable);
         reachable_count = 0;
-        get_vertices_from_file(config.grammar, config.graph, &reachable, &reachable_count);
-        printf("debug: read from file |reachable| = %zu\n", reachable_count);
+*/
         /* Step 2 end. */
+
+        /* Step 3 start. */
+        get_vertices_from_file(config.grammar, config.graph, &reachable, &reachable_count);
+        printf("debug: got vertices from file\n"); 
+        // a random permutation
+        permute_elements(&reachable, reachable_count);
+
+        // number of vertices for quering
+        size_t queried_vertices_num = reachable_count;
+        if (reachable_count > 100000) {
+            queried_vertices_num = reachable_count/100;
+        }
+        else if (reachable_count > 10000) {
+            queried_vertices_num = reachable_count/10;
+        }
+        /* Step 3 end. */
+        printf("DEBUG: start cycle\n"); 
 
         bool is_hot = is_hot_enabled;
 
-        for (size_t i = 0; source_sizes[i] != 0; ++i) {
-            for (size_t j = 0; seeds[j] != 0; ++j) {
+        for (size_t j = 0; source_sizes[j] != 0; ++j) {
+            for (size_t m = 0; m < queried_vertices_num/source_sizes[j]; ++m) {
                 ParserResult parser_result = parser(config);
                 adapter.prepare(parser_result, &(CFL_multsrc_PrepareData){.optimizations = optimizations,
                                                                           .reachable_srcs = reachable,
-                                                                          .reachable_count = reachable_count,
-                                                                          .seed = seeds[j],
-                                                                          .fixed_random_count = source_sizes[i]});
+                                                                          .start = m*source_sizes[j],
+                                                                          .final = (m+1)*source_sizes[j]-1});
 
                 double *start = calloc(rounds_count, sizeof(double));
                 double *end = calloc(rounds_count, sizeof(double));
@@ -380,7 +417,7 @@ int main(int argc, char **argv) {
                 }
                 size_t result = 0;
                 ssize_t max_memory_kb = 0;
-                for (size_t i = 0; i < rounds_count; i++) {
+                for (size_t k = 0; k < rounds_count; k++) {
                     TRY(adapter.init_outputs());
 
                     // in some cases free don't change memory usage, so we need to reset it manually
@@ -390,11 +427,11 @@ int main(int argc, char **argv) {
                         exit(EXIT_FAILURE);
                     }
 
-                    start[i] = LAGraph_WallClockTime();
+                    start[k] = LAGraph_WallClockTime();
 #ifndef CI
                     retval = adapter.run();
 #endif
-                    end[i] = LAGraph_WallClockTime();
+                    end[k] = LAGraph_WallClockTime();
                     max_memory_kb = mem_get_peak_kb();
 
                     if (is_test) {
@@ -422,7 +459,7 @@ int main(int argc, char **argv) {
                         if (retval != 0) {
                             printf("\t(MSG: %s)", msg);
                         }
-                        printf(" (%.4f sec)", end[i] - start[i]);
+                        printf(" (%.4f sec)", end[k] - start[k]);
 
                         TRY(adapter.free_outputs());
                         break;
@@ -435,13 +472,13 @@ int main(int argc, char **argv) {
                         continue;
                     }
 
-                    printf("\t%.3fs", end[i] - start[i]);
+                    printf("\t%.3fs", end[k] - start[k]);
                     fflush(stdout);
 
                     result = adapter.get_result();
                     TRY(adapter.free_outputs());
                     save_result(algo, config.grammar, config.graph, result, max_memory_kb,
-                                (size_t)((end[i] - start[i]) * 1000));
+                                (size_t)((end[k] - start[k]) * 1000));
                     // in some cases free don't change memory usage, so we need to reset it manually
                     malloc_trim(0);
                 }
@@ -457,8 +494,8 @@ int main(int argc, char **argv) {
                 }
 
                 double sum = 0;
-                for (size_t i = 0; i < rounds_count; i++) {
-                    sum += end[i] - start[i];
+                for (size_t k = 0; k < rounds_count; k++) {
+                    sum += end[k] - start[k];
                 }
                 printf("\tTime elapsed (avg): %.6f seconds. %zd KB max memory. Result: %ld (return code "
                        "%d) (%s)\n\n",

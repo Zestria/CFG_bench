@@ -47,8 +47,7 @@ static GrB_Info adapter_CFL_prepare(ParserResult parser_result, void *prepare_da
     TRY(adapter_CFL_prepare_common(parser_result, &state.adj_matrices, &state.terms_count, &state.nonterms_count,
                                    &state.rules, &state.rules_count, &state.graph_size));
 
-    adapter_CFL_init_src_nodes_common(&state.srcs, &state.source_count, state.graph_size, cfg->reachable_srcs,
-                                      cfg->reachable_count, cfg->seed, cfg->fixed_random_count);
+    adapter_CFL_init_src_nodes_common(&state.srcs, &state.source_count, cfg->reachable_srcs, cfg->start, cfg->final);
 
     return GrB_SUCCESS;
 }

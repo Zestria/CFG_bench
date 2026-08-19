@@ -9,7 +9,7 @@
         }                                                                                                              \
     }
 
-/* Changes for step 1 */
+/* Changes for step 1 --> */
 GrB_Info extract_reachable_sources(GrB_Matrix *outputs, size_t start_symbol_idx, size_t V, GrB_Index **srcs_out,
                                    size_t *srcs_count_out) {
     GrB_Matrix S = outputs[start_symbol_idx];
@@ -40,51 +40,19 @@ GrB_Info extract_reachable_sources(GrB_Matrix *outputs, size_t start_symbol_idx,
     GrB_free(&row_degrees);
     return GrB_SUCCESS;
 }
-/* Changes for step 1 */
+/* <-- Changes for step 1 */
 
-GrB_Info adapter_CFL_init_src_nodes_common(GrB_Index **srcs, size_t *source_count, size_t graph_size,
-                                           GrB_Index *reachable_pool, size_t reachable_count, size_t seed,
-                                           size_t fixed_random_count) {
-    srand((unsigned int)seed);
-
-    if (reachable_count > graph_size) {
-        fprintf(stderr, "error: adapter_CFL_init_src_nodes_common: reachable_count > graph_size\n");
-    }
-
-    if (reachable_count == 0 || !reachable_pool) {
-        *source_count = 5;
-        *srcs = calloc(*source_count, sizeof(GrB_Index));
-        if (srcs == NULL) {
-            fprintf(stderr, "out of memory\n");
-            abort();
-        }
-        for (size_t i = 0; i < *source_count; i++) {
-            (*srcs)[i] = i;
-        }
-
-        return GrB_SUCCESS;
-    }
-
-    GrB_Index *pool = malloc(reachable_count * sizeof(GrB_Index));
-    if (!pool) {
-        fprintf(stderr, "out of memory\n");
-        abort();
-    }
-    memcpy(pool, reachable_pool, reachable_count * sizeof(GrB_Index));
-
-    *source_count = (fixed_random_count < reachable_count) ? fixed_random_count : reachable_count;
+GrB_Info adapter_CFL_init_src_nodes_common(GrB_Index **srcs, size_t *source_count,
+                                           GrB_Index *reachable_pool, size_t start, size_t final) {
+    *source_count = final - start + 1;
     *srcs = malloc(*source_count * sizeof(GrB_Index));
-
     if (!srcs) {
         fprintf(stderr, "out of memory");
     }
 
     for (size_t i = 0; i < *source_count; ++i) {
-        size_t j = i + (rand() % (reachable_count - i));
-        (*srcs)[i] = pool[j];
-        pool[j] = pool[i];
+        (*srcs)[i] = reachable_pool[start + i];
     }
 
-    free(pool);
     return GrB_SUCCESS;
 }

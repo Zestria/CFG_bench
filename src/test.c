@@ -239,7 +239,7 @@ int main(int argc, char **argv) {
     size_t rounds_count = 10;
 
     /* Step 2 */
-    const size_t source_sizes[] = {100, 0};
+    const size_t source_sizes[] = {1, 10, 100, 0};
     //const size_t seeds[] = {2430986565, 1859447115, 694443915, 831769172, 2376066489, 0};
     /* Step 2 */
 
@@ -382,7 +382,7 @@ int main(int argc, char **argv) {
 
         /* Step 3 start. */
         get_vertices_from_file(config.grammar, config.graph, &reachable, &reachable_count);
-        printf("debug: got vertices from file\n"); 
+        // printf("debug: got vertices from file\n"); 
         // a random permutation
         permute_elements(&reachable, reachable_count);
 
@@ -395,7 +395,7 @@ int main(int argc, char **argv) {
             queried_vertices_num = reachable_count/10;
         }
         /* Step 3 end. */
-        printf("DEBUG: start cycle\n"); 
+        // printf("DEBUG: start cycle\n"); 
 
         bool is_hot = is_hot_enabled;
 
@@ -477,7 +477,7 @@ int main(int argc, char **argv) {
 
                     result = adapter.get_result();
                     TRY(adapter.free_outputs());
-                    save_result(algo, config.grammar, config.graph, result, max_memory_kb,
+                    save_result(algo, config.grammar, config.graph, source_sizes[j], result, max_memory_kb,
                                 (size_t)((end[k] - start[k]) * 1000));
                     // in some cases free don't change memory usage, so we need to reset it manually
                     malloc_trim(0);

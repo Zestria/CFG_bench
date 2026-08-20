@@ -17,7 +17,7 @@ static void _init_file_name(void) {
 }
 
 // Saves the result of the analysis to a csv file
-void save_result(char *algo_name, char *cnf_str, char *graph_str, size_t result, ssize_t max_memory_kb,
+void save_result(char *algo_name, char *cnf_str, char *graph_str, size_t source_size ,size_t result, ssize_t max_memory_kb,
                  size_t time_ms) {
     if (!initialized) {
         _init_file_name();
@@ -31,10 +31,10 @@ void save_result(char *algo_name, char *cnf_str, char *graph_str, size_t result,
     }
 
     if (!initialized) {
-        fprintf(file, "algo_name,cnf,graph,result,max_memory_kb,time_ms\n");
+        fprintf(file, "algo_name,cnf,graph,source_size,result,max_memory_kb,time_ms\n");
         initialized = true;
     }
 
-    fprintf(file, "\"%s\",\"%s\",\"%s\",%zu,%zd,%zu\n", algo_name, cnf_str, graph_str, result, max_memory_kb, time_ms);
+    fprintf(file, "\"%s\",\"%s\",\"%s\",%zu,%zu,%zd,%zu\n", algo_name, cnf_str, graph_str, source_size, result, max_memory_kb, time_ms);
     fclose(file);
 }

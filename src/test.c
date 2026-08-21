@@ -388,18 +388,21 @@ int main(int argc, char **argv) {
 
         // number of vertices for quering
         size_t queried_vertices_num = reachable_count;
-        if (reachable_count > 100000) {
+        if (reachable_count > 2000) {
+            queried_vertices_num = 2000;
+        }
+        /*if (reachable_count > 100000) {
             queried_vertices_num = reachable_count/100;
         }
         else if (reachable_count > 10000) {
             queried_vertices_num = reachable_count/10;
-        }
+        }*/
         /* Step 3 end. */
         // printf("DEBUG: start cycle\n"); 
 
         bool is_hot = is_hot_enabled;
 
-        for (size_t j = 0; source_sizes[j] != 0; ++j) {
+        for (size_t j = 0; source_sizes[j] != 0; ++j) { 
             for (size_t m = 0; m < queried_vertices_num/source_sizes[j]; ++m) {
                 ParserResult parser_result = parser(config);
                 adapter.prepare(parser_result, &(CFL_multsrc_PrepareData){.optimizations = optimizations,
@@ -467,7 +470,7 @@ int main(int argc, char **argv) {
 
                     if (is_hot) {
                         is_hot = false;
-                        i--;
+                        k--;
                         TRY(adapter.free_outputs());
                         continue;
                     }

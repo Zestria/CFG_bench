@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <math.h>
 
 #define run_algorithm()                                                                                                \
     LAGraph_CFL_reachability_adv(outputs, adj_matrices, symbols_amount, grammar.rules, grammar.rules_count, msg,       \
@@ -211,6 +212,8 @@ void get_vertices_from_file(char *grammar, char *graph, GrB_Index **reachable, s
 
 #define SEED 2430986565
 
+#define MIN(A, B) (((A) < (B)) ? (A) : (B))
+
 void permute_elements(GrB_Index **reachable, size_t reachable_count) {
     srand((unsigned int)SEED);
     
@@ -240,7 +243,7 @@ int main(int argc, char **argv) {
 
     /* Step 2 */
     const size_t source_sizes[] = {1, 10, 100, 0};
-    //const size_t seeds[] = {2430986565, 1859447115, 694443915, 831769172, 2376066489, 0};
+    const size_t chunks_num[] = {30, 30, 30};
     /* Step 2 */
 
     AdapterMethods adapter = {0};
@@ -312,6 +315,13 @@ int main(int argc, char **argv) {
             exit(EXIT_FAILURE);
         }
     }
+
+    GrB_init(GrB_NONBLOCKING);
+
+    // Check current thread limit
+    pthread_t nthreads;
+    GxB_Global_Option_get(GxB_GLOBAL_NTHREADS, &nthreads);
+    printf("GraphBLAS max threads allowed: %zu\n", nthreads);
 
     if (!is_algo_chosen) {
         adapter = adapter_CFL_adv_get_methods();
@@ -388,22 +398,17 @@ int main(int argc, char **argv) {
 
         // number of vertices for quering
         size_t queried_vertices_num = reachable_count;
-        if (reachable_count > 2000) {
-            queried_vertices_num = 2000;
-        }
-        /*if (reachable_count > 100000) {
-            queried_vertices_num = reachable_count/100;
-        }
-        else if (reachable_count > 10000) {
-            queried_vertices_num = reachable_count/10;
-        }*/
-        /* Step 3 end. */
+        if (reachable_count > 3000) {
+            queried_vertices_num = 3000;
+        } 
         // printf("DEBUG: start cycle\n"); 
 
         bool is_hot = is_hot_enabled;
 
-        for (size_t j = 0; source_sizes[j] != 0; ++j) { 
-            for (size_t m = 0; m < queried_vertices_num/source_sizes[j]; ++m) {
+        for (size_t j = 0; source_sizes[j] != 0; ++j) {
+            size_t _chunk_num_A = queried_vertices_num/source_sizes[j];
+            size_t _chunk_num_B = chunks_num[j];
+            for (size_t m = 0; m < MIN(_chunk_num_A, _chunk_num_B); ++m) {
                 ParserResult parser_result = parser(config);
                 adapter.prepare(parser_result, &(CFL_multsrc_PrepareData){.optimizations = optimizations,
                                                                           .reachable_srcs = reachable,
@@ -480,12 +485,20 @@ int main(int argc, char **argv) {
 
                     result = adapter.get_result();
                     TRY(adapter.free_outputs());
-                    save_result(algo, config.grammar, config.graph, source_sizes[j], result, max_memory_kb,
-                                (size_t)((end[k] - start[k]) * 1000));
+                    // save_result(algo, config.grammar, config.graph, source_sizes[j], result, max_memory_kb,
+                    //             (size_t)((end[k] - start[k]) * 1000));
                     // in some cases free don't change memory usage, so we need to reset it manually
                     malloc_trim(0);
                 }
                 printf("\n");
+
+                if (rounds_count > 0) {
+                    size_t min_round_time = (size_t)lround((end[0] - start[0])*1000.0);
+                    for (size_t k = 0; k < rounds_count; ++k) {
+                        min_round_time = MIN(min_round_time, (size_t)lround((end[k] - start[k])*1000.0));
+                    }
+                    save_result(algo, config.grammar, config.graph, source_sizes[j], 0, 0, min_round_time);
+                }
 
                 if (is_test) {
                     free(start);

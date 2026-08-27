@@ -12,3 +12,8 @@ data.back
 data.old
 build
 .cache
+*.sh
+computated_data/
+profiling_data/
+compile_commands.json
+

@@ -48,6 +48,14 @@ Benchmark options:
   --use-random-percent <n>
                     Use a random n% of the vertices as start vertices, the same
                     ones for every run
+  --experiment      Measure a multiple-source algorithm on source chunks from the
+                    start vertices file (implies --use-start-nodes)
+  --source-sizes <list>
+                    Comma-separated source set sizes (default: 1,10,100)
+  --chunks <n>      Number of source chunks per size (default: 30)
+  --seed <n>        Seed for shuffling source vertices (default: 2026)
+  --results-file <path>
+                    Write results to this CSV file instead of results/results_<time>.csv
   -a <algorithm>    Algorithm to use (default: CFL_adv; options: CFL_adv, CFL, CFL_single_path, CFL_all_path, CFL_all_path_adv, CFL_CFPQ_RSM, CFL_multsrc, CFL_multsrc_adv, CFL_Kron)
 
 Optimization flags:
@@ -331,6 +339,50 @@ from the config and `-t` prints a warning and `[Unknown]`.
    ```bash
    ./build/cfg_bench -c configs/your_config.csv -a CFL_multsrc --use-start-nodes -r 10 --hot
    ```
+
+## Source-Chunk Experiment Mode
+
+`--experiment` measures a multiple-source algorithm on several source sets. The
+fourth config column is then a candidate pool, normally produced by
+`pairs_extractor --start-only`. The pool is shuffled once per graph. For every
+`--source-sizes` value, consecutive chunks are taken from the start of that
+shuffled pool; if the pool is smaller than `chunks * |S|`, it is reused
+cyclically. Each chunk gets one warm-up run and `-r` measured runs.
+
+`configs/experiment.csv` has no candidate files, so run the helper first; it
+extracts candidates, writes a config with the fourth column filled, runs all
+three algorithms, and aggregates the results:
+
+```bash
+python3 tools/run_experiment.py
+```
+
+The equivalent manual command after preparing such a config is:
+
+```bash
+./build/cfg_bench -c <config with candidate files> -a CFL_multsrc_adv -efbl \
+  --experiment --source-sizes 1,10,100 --chunks 30 -r 3 --hot
+```
+
+`CFL_adv` does not depend on the source set. Run it separately, normally with
+10 measured rounds:
+
+```bash
+./build/cfg_bench -c configs/experiment.csv -a CFL_adv -efbl -r 10 --hot
+```
+
+`configs/experiment.csv` contains the graphs used by the coursework experiment.
+The raw CSV has one row per measured run and these columns:
+
+```text
+algo_name,cnf,graph,source_size,chunk,result,max_memory_kb,time_s
+```
+
+`time_s` is a `double` in seconds. For chunked runs `source_size` is `|S|` and
+`chunk` is the chunk index; for `CFL_adv` `source_size` is `0` and `chunk` is
+the round index. `tools/aggregate_experiment.py` averages the runs of each
+chunk and then writes mean/median tables. `tools/run_experiment.py` does the
+whole pipeline: candidate extraction, benchmark runs, and aggregation.
 
 ## Reachable Pair Extraction
 

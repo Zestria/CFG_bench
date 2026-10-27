@@ -1,0 +1,8 @@
+data/graphs/rdf/eclass.g,data/grammars/nested_parentheses_subClassOf_type.cnf,-1
+data/graphs/rdf/go_hierarchy.g,data/grammars/nested_parentheses_subClassOf_type.cnf,-1
+data/graphs/rdf/go.g,data/grammars/nested_parentheses_subClassOf_type.cnf,-1
+data/graphs/java/avrora.g,data/grammars/java_points_to.cnf,-1
+data/graphs/java/batik.g,data/grammars/java_points_to.cnf,-1
+data/graphs/c_alias/block.g,data/grammars/c_alias.cnf,-1
+data/graphs/c_alias/init.g,data/grammars/c_alias.cnf,-1
+data/graphs/c_alias/mm.g,data/grammars/c_alias.cnf,-1

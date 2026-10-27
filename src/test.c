@@ -7,8 +7,11 @@
 #include <GraphBLAS.h>
 #include <LAGraph.h>
 #include <LAGraphX.h>
+#include <errno.h>
 #include <getopt.h>
+#include <limits.h>
 #include <malloc.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -101,11 +104,18 @@ enum {
     CFL_ALL_PATH_USE_CFPQ = 1002,
     USE_START_NODES_OPTION = 1003,
     COMPUTE_RESULTS_OPTION = 1004,
-    USE_RANDOM_PERCENT_OPTION = 1005
+    USE_RANDOM_PERCENT_OPTION = 1005,
+    EXPERIMENT_OPTION = 1006,
+    SOURCE_SIZES_OPTION = 1007,
+    CHUNKS_OPTION = 1008,
+    SEED_OPTION = 1009,
+    RESULTS_FILE_OPTION = 1010
 };
 
 // the random start vertices are the same for every run
 #define RANDOM_START_NODES_SEED 2026
+#define DEFAULT_EXPERIMENT_SEED RANDOM_START_NODES_SEED
+#define DEFAULT_CHUNKS_COUNT 30
 
 static void print_usage(const char *program_name) {
     fprintf(stderr,
@@ -122,6 +132,14 @@ static void print_usage(const char *program_name) {
             "  --use-random-percent <n>\n"
             "                    Use a random n%% of the vertices as start vertices, the same\n"
             "                    ones for every run\n"
+            "  --experiment      Measure a multiple-source algorithm on source chunks from the\n"
+            "                    start vertices file (implies --use-start-nodes)\n"
+            "  --source-sizes <list>\n"
+            "                    Comma-separated source set sizes (default: 1,10,100)\n"
+            "  --chunks <n>      Number of source chunks per size (default: 30)\n"
+            "  --seed <n>        Seed for shuffling source vertices (default: 2026)\n"
+            "  --results-file <path>\n"
+            "                    Write results to this CSV file instead of results/results_<time>.csv\n"
             "  -a <algorithm>    Algorithm to use (default: " DEFAULT_ALGORITHM "; options: ",
             program_name);
     registry_print_names(stderr);
@@ -180,6 +198,219 @@ static void choose_random_start_nodes(ParserResult *parser_result, size_t percen
     parser_result->start_nodes_count = count;
 }
 
+static void shuffle_start_nodes(GrB_Index *nodes, size_t count, unsigned int seed) {
+    // Fisher-Yates shuffle, so the same seed and the same candidate file give
+    // the same chunks for every algorithm
+    for (size_t i = count; i > 1; i--) {
+        size_t j = (size_t)rand_r(&seed) % i;
+        GrB_Index swap = nodes[i - 1];
+        nodes[i - 1] = nodes[j];
+        nodes[j] = swap;
+    }
+}
+
+// parses a comma-separated list of positive source set sizes
+static size_t *parse_source_sizes(const char *arg, size_t *out_count) {
+    char *copy = strdup(arg);
+    if (copy == NULL) {
+        fprintf(stderr, "Failed to allocate memory for source sizes\n");
+        exit(EXIT_FAILURE);
+    }
+
+    size_t *sizes = NULL;
+    size_t count = 0;
+    size_t capacity = 0;
+    char *saveptr = NULL;
+
+    for (char *token = strtok_r(copy, ",", &saveptr); token != NULL; token = strtok_r(NULL, ",", &saveptr)) {
+        char *start = token;
+        while (*start == ' ' || *start == '\t') {
+            start++;
+        }
+
+        errno = 0;
+        char *end = NULL;
+        unsigned long value = strtoul(start, &end, 10);
+
+        while (end != NULL && (*end == ' ' || *end == '\t')) {
+            end++;
+        }
+
+        if (*start < '0' || *start > '9' || errno != 0 || end == start || *end != '\0' || value == 0 ||
+            value > SIZE_MAX) {
+            fprintf(stderr, "Invalid source size: %s\n", token);
+            exit(EXIT_FAILURE);
+        }
+
+        for (size_t i = 0; i < count; i++) {
+            if (sizes[i] == (size_t)value) {
+                fprintf(stderr, "Duplicate source size: %lu\n", value);
+                exit(EXIT_FAILURE);
+            }
+        }
+
+        if (count == capacity) {
+            capacity = capacity == 0 ? 4 : capacity * 2;
+            sizes = realloc(sizes, capacity * sizeof(*sizes));
+            if (sizes == NULL) {
+                fprintf(stderr, "Failed to allocate memory for source sizes\n");
+                exit(EXIT_FAILURE);
+            }
+        }
+        sizes[count++] = (size_t)value;
+    }
+
+    free(copy);
+
+    if (count == 0) {
+        fprintf(stderr, "Source sizes must not be empty\n");
+        exit(EXIT_FAILURE);
+    }
+
+    *out_count = count;
+    return sizes;
+}
+
+// Runs a multiple-source algorithm on shuffled source chunks. The candidate
+// pool is parser_result->start_nodes, loaded from the config's fourth column.
+// For every chunk the adapter is prepared from scratch, then one warm-up run
+// and rounds_count measured runs are performed.
+static int run_experiment_config(const config_row *config, const AlgorithmEntry *algo, AdapterMethods *adapter,
+                                 const AlgorithmOptions *algo_options, ParserResult *parser_result, size_t rounds_count,
+                                 bool is_hot_enabled, const size_t *source_sizes, size_t source_sizes_count,
+                                 size_t chunks_count, unsigned int seed) {
+    if (parser_result->start_nodes == NULL || parser_result->start_nodes_count == 0) {
+        fprintf(stderr, "Experiment mode requires a non-empty start vertices file (config row: %s)\n",
+                config->start_nodes_path == NULL ? "<none>" : config->start_nodes_path);
+        return EXIT_FAILURE;
+    }
+
+    GrB_Index *pool = parser_result->start_nodes;
+    size_t pool_count = parser_result->start_nodes_count;
+    shuffle_start_nodes(pool, pool_count, seed);
+
+    size_t max_source_size = 0;
+    for (size_t i = 0; i < source_sizes_count; i++) {
+        if (source_sizes[i] > max_source_size) {
+            max_source_size = source_sizes[i];
+        }
+    }
+
+    GrB_Index *chunk_nodes = malloc(max_source_size * sizeof(*chunk_nodes));
+    if (chunk_nodes == NULL) {
+        fprintf(stderr, "Failed to allocate memory for source chunk\n");
+        return EXIT_FAILURE;
+    }
+
+    for (size_t size_index = 0; size_index < source_sizes_count; size_index++) {
+        size_t source_size = source_sizes[size_index];
+
+        for (size_t chunk = 0; chunk < chunks_count; chunk++) {
+            size_t offset = chunk * source_size;
+            for (size_t i = 0; i < source_size; i++) {
+                // cycle through the shuffled pool when it is smaller than
+                // chunks_count * source_size; this keeps exactly 30 chunks
+                chunk_nodes[i] = pool[(offset + i) % pool_count];
+            }
+
+            parser_result->start_nodes = chunk_nodes;
+            parser_result->start_nodes_count = source_size;
+            GrB_Info info = algo->prepare(adapter, parser_result, algo_options);
+            parser_result->start_nodes = pool;
+            parser_result->start_nodes_count = pool_count;
+
+            if (info != GrB_SUCCESS) {
+                fprintf(stderr, "LAGraph failure while preparing |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
+                free(chunk_nodes);
+                return EXIT_FAILURE;
+            }
+
+            bool is_hot = is_hot_enabled;
+            size_t measured = 0;
+            double sum = 0.0;
+
+            while (measured < rounds_count) {
+                info = adapter->init_outputs();
+                if (info != GrB_SUCCESS) {
+                    fprintf(stderr, "LAGraph failure in init_outputs for |S|=%zu chunk=%zu: %d\n", source_size, chunk,
+                            info);
+                    adapter->cleanup();
+                    free(chunk_nodes);
+                    return EXIT_FAILURE;
+                }
+
+                // in some cases free don't change memory usage, so we need to reset it manually
+                malloc_trim(0);
+                if (mem_peak_reset() != 0) {
+                    fprintf(stderr, "Failed to reset memory peak\n");
+                    adapter->free_outputs();
+                    adapter->cleanup();
+                    free(chunk_nodes);
+                    return EXIT_FAILURE;
+                }
+
+                double start_time = LAGraph_WallClockTime();
+                info = adapter->run();
+                double end_time = LAGraph_WallClockTime();
+                ssize_t max_memory_kb = mem_get_peak_kb();
+
+                if (info != GrB_SUCCESS) {
+                    fprintf(stderr, "LAGraph failure in run for |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
+                    adapter->free_outputs();
+                    adapter->cleanup();
+                    free(chunk_nodes);
+                    return EXIT_FAILURE;
+                }
+
+                if (is_hot) {
+                    is_hot = false;
+                    info = adapter->free_outputs();
+                    if (info != GrB_SUCCESS) {
+                        fprintf(stderr, "LAGraph failure in free_outputs for |S|=%zu chunk=%zu: %d\n", source_size,
+                                chunk, info);
+                        adapter->cleanup();
+                        free(chunk_nodes);
+                        return EXIT_FAILURE;
+                    }
+                    continue;
+                }
+
+                size_t result = adapter->get_result();
+                info = adapter->free_outputs();
+                if (info != GrB_SUCCESS) {
+                    fprintf(stderr, "LAGraph failure in free_outputs for |S|=%zu chunk=%zu: %d\n", source_size, chunk,
+                            info);
+                    adapter->cleanup();
+                    free(chunk_nodes);
+                    return EXIT_FAILURE;
+                }
+
+                double elapsed = end_time - start_time;
+                sum += elapsed;
+                measured++;
+
+                save_result(algo->name, config->grammar, config->graph, source_size, chunk, result, max_memory_kb,
+                            elapsed);
+                malloc_trim(0);
+            }
+
+            info = adapter->cleanup();
+            if (info != GrB_SUCCESS) {
+                fprintf(stderr, "LAGraph failure in cleanup for |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
+                free(chunk_nodes);
+                return EXIT_FAILURE;
+            }
+
+            printf("\t|S|=%zu chunk=%zu/%zu: %.6f s (avg of %zu runs)\n", source_size, chunk + 1, chunks_count,
+                   sum / (double)measured, measured);
+            fflush(stdout);
+        }
+    }
+
+    free(chunk_nodes);
+    return EXIT_SUCCESS;
+}
+
 // runs CFL_adv with all optimizations on the same data and returns the result "algo" must have
 static GrB_Info compute_expected_result(const ParserResult *parser_result, const AlgorithmEntry *algo,
                                         bool use_start_nodes, size_t *expected) {
@@ -223,6 +454,17 @@ int main(int argc, char **argv) {
     char *input_config = NULL;
     size_t rounds_count = 10;
     bool use_cfpq = false;
+    bool experiment = false;
+    size_t default_source_sizes[] = {1, 10, 100};
+    size_t *source_sizes = default_source_sizes;
+    size_t source_sizes_count = sizeof(default_source_sizes) / sizeof(default_source_sizes[0]);
+    bool source_sizes_allocated = false;
+    bool source_sizes_given = false;
+    bool chunks_given = false;
+    bool seed_given = false;
+    size_t chunks_count = DEFAULT_CHUNKS_COUNT;
+    unsigned int experiment_seed = DEFAULT_EXPERIMENT_SEED;
+    char *results_file = NULL;
 
     AdapterMethods adapter = {0};
 
@@ -233,6 +475,11 @@ int main(int argc, char **argv) {
         {"CFL-all-path-use-CFPQ-Core", no_argument, 0, CFL_ALL_PATH_USE_CFPQ},
         {"compute-results", no_argument, 0, COMPUTE_RESULTS_OPTION},
         {"use-random-percent", required_argument, 0, USE_RANDOM_PERCENT_OPTION},
+        {"experiment", no_argument, 0, EXPERIMENT_OPTION},
+        {"source-sizes", required_argument, 0, SOURCE_SIZES_OPTION},
+        {"chunks", required_argument, 0, CHUNKS_OPTION},
+        {"seed", required_argument, 0, SEED_OPTION},
+        {"results-file", required_argument, 0, RESULTS_FILE_OPTION},
         {0, 0, 0, 0},
     };
 
@@ -271,6 +518,46 @@ int main(int argc, char **argv) {
                 fprintf(stderr, "--use-random-percent takes a number from 1 to 100\n");
                 exit(EXIT_FAILURE);
             }
+            break;
+        case EXPERIMENT_OPTION:
+            experiment = true;
+            break;
+        case SOURCE_SIZES_OPTION:
+            if (source_sizes_allocated) {
+                free(source_sizes);
+            }
+            source_sizes = parse_source_sizes(optarg, &source_sizes_count);
+            source_sizes_allocated = true;
+            source_sizes_given = true;
+            break;
+        case CHUNKS_OPTION: {
+            errno = 0;
+            char *end = NULL;
+            unsigned long value = strtoul(optarg, &end, 10);
+            bool is_digit = optarg[0] >= '0' && optarg[0] <= '9';
+            if (!is_digit || errno != 0 || end == optarg || *end != '\0' || value == 0 || value > SIZE_MAX) {
+                fprintf(stderr, "--chunks takes a positive integer\n");
+                exit(EXIT_FAILURE);
+            }
+            chunks_count = (size_t)value;
+            chunks_given = true;
+            break;
+        }
+        case SEED_OPTION: {
+            errno = 0;
+            char *end = NULL;
+            unsigned long value = strtoul(optarg, &end, 10);
+            bool is_digit = optarg[0] >= '0' && optarg[0] <= '9';
+            if (!is_digit || errno != 0 || end == optarg || *end != '\0' || value > UINT_MAX) {
+                fprintf(stderr, "--seed takes an unsigned integer\n");
+                exit(EXIT_FAILURE);
+            }
+            experiment_seed = (unsigned int)value;
+            seed_given = true;
+            break;
+        }
+        case RESULTS_FILE_OPTION:
+            results_file = optarg;
             break;
         case 't':
             is_test = true;
@@ -312,6 +599,21 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    if (!experiment && (source_sizes_given || chunks_given || seed_given)) {
+        fprintf(stderr, "--source-sizes, --chunks and --seed require --experiment\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (experiment && (is_test || is_bench_parse_enabled || compute_results)) {
+        fprintf(stderr, "--experiment can't be used with -t, --bench-parse or --compute-results\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (experiment && random_percent > 0) {
+        fprintf(stderr, "--experiment and --use-random-percent can't be used together\n");
+        exit(EXIT_FAILURE);
+    }
+
     if (random_percent > 0 && use_start_nodes) {
         fprintf(stderr, "--use-random-percent and --use-start-nodes can't be used together\n");
         exit(EXIT_FAILURE);
@@ -320,11 +622,23 @@ int main(int argc, char **argv) {
     if (random_percent > 0) {
         use_start_nodes = true;
     }
+    if (experiment) {
+        use_start_nodes = true;
+    }
 
     if (algo == NULL) {
         algo = registry_find(DEFAULT_ALGORITHM);
         adapter = algo->get_methods();
         printf("No algorithm chosen, using " DEFAULT_ALGORITHM " by default\n");
+    }
+
+    if (experiment && !algo->is_multiple_source) {
+        fprintf(stderr, "--experiment is only supported for multiple-source algorithms\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (results_file != NULL) {
+        set_result_file(results_file);
     }
 
     AlgorithmOptions algo_options = {
@@ -368,6 +682,19 @@ int main(int argc, char **argv) {
             choose_random_start_nodes(&parser_result, random_percent);
         }
 
+        if (experiment) {
+            int experiment_status =
+                run_experiment_config(&config, algo, &adapter, &algo_options, &parser_result, rounds_count,
+                                      is_hot_enabled, source_sizes, source_sizes_count, chunks_count, experiment_seed);
+            free_parser_result(&parser_result);
+            if (experiment_status != EXIT_SUCCESS) {
+                has_test_failure = true;
+                break;
+            }
+            printf("\n");
+            continue;
+        }
+
         double *start = calloc(rounds_count, sizeof(double));
         double *end = calloc(rounds_count, sizeof(double));
         if (start == NULL || end == NULL) {
@@ -398,6 +725,11 @@ int main(int argc, char **argv) {
                 TRY(compute_expected_result(&parser_result, algo, use_start_nodes, &expected_result));
                 computed_cache_put(kind, config.graph, config.grammar, start_nodes, expected_result);
             }
+        }
+
+        size_t run_source_size = 0;
+        if (algo->is_multiple_source && use_start_nodes) {
+            run_source_size = parser_result.start_nodes_count;
         }
 
         algo->prepare(&adapter, &parser_result, &algo_options);
@@ -483,8 +815,8 @@ int main(int argc, char **argv) {
 
             result = adapter.get_result();
             TRY(adapter.free_outputs());
-            save_result(algo->name, config.grammar, config.graph, result, max_memory_kb,
-                        (size_t)((end[j] - start[j]) * 1000));
+            save_result(algo->name, config.grammar, config.graph, run_source_size, j, result, max_memory_kb,
+                        end[j] - start[j]);
             // in some cases free don't change memory usage, so we need to reset it manually
             malloc_trim(0);
         }
@@ -517,6 +849,9 @@ int main(int argc, char **argv) {
 
     free(configs);
     free(config_text);
+    if (source_sizes_allocated) {
+        free(source_sizes);
+    }
     TRY(adapter.teardown());
     return has_test_failure ? EXIT_FAILURE : EXIT_SUCCESS;
 }

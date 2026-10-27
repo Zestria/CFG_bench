@@ -56,6 +56,8 @@ Benchmark options:
   --seed <n>        Seed for shuffling source vertices (default: 2026)
   --results-file <path>
                     Write results to this CSV file instead of results/results_<time>.csv
+  --rsm-lib <path>  Load LAGraph_CFPQ_RSM from this shared library instead of
+                    liblagraphx (CFL_CFPQ_RSM only)
   -a <algorithm>    Algorithm to use (default: CFL_adv; options: CFL_adv, CFL, CFL_single_path, CFL_all_path, CFL_all_path_adv, CFL_CFPQ_RSM, CFL_multsrc, CFL_multsrc_adv, CFL_Kron)
 
 Optimization flags:
@@ -375,10 +377,12 @@ The equivalent manual command after preparing such a config is:
 The raw CSV has one row per measured run and these columns:
 
 ```text
-algo_name,cnf,graph,source_size,chunk,result,max_memory_kb,time_s
+algo_name,cnf,graph,source_size,chunk,result,result_hash,max_memory_kb,time_s
 ```
 
-`time_s` is a `double` in seconds. For chunked runs `source_size` is `|S|` and
+`result_hash` is an order-independent 64-bit hash of the result when the
+adapter provides one (`CFL_CFPQ_RSM` does) and `0` otherwise. `time_s` is a
+`double` in seconds. For chunked runs `source_size` is `|S|` and
 `chunk` is the chunk index; for `CFL_adv` `source_size` is `0` and `chunk` is
 the round index. `tools/aggregate_experiment.py` averages the runs of each
 chunk and then writes mean/median tables. `tools/run_experiment.py` does the

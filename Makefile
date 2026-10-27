@@ -7,7 +7,7 @@ PAIRS_EXTRACTOR_TARGET := $(BUILD_DIR)/pairs_extractor
 
 CFLAGS ?= -O2 -Wall -Wextra -Wpedantic -Wno-sign-compare
 INCLUDES := -I/usr/local/include/suitesparse -I$(SRC_DIR) -I$(SRC_DIR)/adapters
-LDLIBS := -lgraphblas -llagraph -llagraphx
+LDLIBS := -lgraphblas -llagraph -llagraphx -ldl
 VALGRIND ?= valgrind
 VALGRIND_OPTS ?= --leak-check=full --show-leak-kinds=definite,indirect --errors-for-leak-kinds=definite,indirect --error-exitcode=1
 CI_CONFIG := configs/for_test.csv

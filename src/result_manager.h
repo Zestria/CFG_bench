@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdint.h>
 #include <stdlib.h>
 #include <sys/types.h>
 
@@ -9,4 +10,4 @@ void set_result_file(const char *path);
 
 // Saves the result of the analysis to a csv file
 void save_result(const char *algo_name, char *cnf_str, char *graph_str, size_t source_size, size_t chunk, size_t result,
-                 ssize_t max_memory_kb, double time_s);
+                 uint64_t result_hash, ssize_t max_memory_kb, double time_s);

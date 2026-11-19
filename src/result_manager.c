@@ -1,4 +1,5 @@
 #include "result_manager.h"
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -27,7 +28,7 @@ void set_result_file(const char *path) {
 
 // Saves the result of the analysis to a csv file
 void save_result(const char *algo_name, char *cnf_str, char *graph_str, size_t source_size, size_t chunk, size_t result,
-                 ssize_t max_memory_kb, double time_s) {
+                 uint64_t result_hash, ssize_t max_memory_kb, double time_s) {
     if (!initialized && file_name[0] == '\0') {
         _init_file_name();
     }
@@ -40,11 +41,11 @@ void save_result(const char *algo_name, char *cnf_str, char *graph_str, size_t s
     }
 
     if (!initialized) {
-        fprintf(file, "algo_name,cnf,graph,source_size,chunk,result,max_memory_kb,time_s\n");
+        fprintf(file, "algo_name,cnf,graph,source_size,chunk,result,result_hash,max_memory_kb,time_s\n");
         initialized = true;
     }
 
-    fprintf(file, "\"%s\",\"%s\",\"%s\",%zu,%zu,%zu,%zd,%.9f\n", algo_name, cnf_str, graph_str, source_size, chunk,
-            result, max_memory_kb, time_s);
+    fprintf(file, "\"%s\",\"%s\",\"%s\",%zu,%zu,%zu,%" PRIu64 ",%zd,%.9f\n", algo_name, cnf_str, graph_str, source_size,
+            chunk, result, result_hash, max_memory_kb, time_s);
     fclose(file);
 }

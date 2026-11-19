@@ -13,6 +13,8 @@ typedef struct {
     int8_t optimizations;
     bool use_start_nodes;
     bool use_cfpq;
+    // optional path to a shared library that replaces LAGraph_CFPQ_RSM
+    const char *rsm_lib;
 } AlgorithmOptions;
 
 // builds the adapter's PrepareData from the options and calls adapter->prepare

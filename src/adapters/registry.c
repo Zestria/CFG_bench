@@ -37,7 +37,7 @@ static GrB_Info prepare_CFL_all_path_adv(const AdapterMethods *adapter, const Pa
 
 static GrB_Info prepare_CFL_CFPQ_RSM(const AdapterMethods *adapter, const ParserResult *parser_result,
                                      const AlgorithmOptions *options) {
-    CFL_CFPQ_RSM_PrepareData data = {.use_start_nodes = options->use_start_nodes};
+    CFL_CFPQ_RSM_PrepareData data = {.use_start_nodes = options->use_start_nodes, .rsm_lib = options->rsm_lib};
     return adapter->prepare(parser_result, &data);
 }
 

@@ -109,7 +109,8 @@ enum {
     SOURCE_SIZES_OPTION = 1007,
     CHUNKS_OPTION = 1008,
     SEED_OPTION = 1009,
-    RESULTS_FILE_OPTION = 1010
+    RESULTS_FILE_OPTION = 1010,
+    RSM_LIB_OPTION = 1011
 };
 
 // the random start vertices are the same for every run
@@ -140,6 +141,8 @@ static void print_usage(const char *program_name) {
             "  --seed <n>        Seed for shuffling source vertices (default: 2026)\n"
             "  --results-file <path>\n"
             "                    Write results to this CSV file instead of results/results_<time>.csv\n"
+            "  --rsm-lib <path>  Load LAGraph_CFPQ_RSM from this shared library instead of\n"
+            "                    liblagraphx (CFL_CFPQ_RSM only)\n"
             "  -a <algorithm>    Algorithm to use (default: " DEFAULT_ALGORITHM "; options: ",
             program_name);
     registry_print_names(stderr);
@@ -376,6 +379,7 @@ static int run_experiment_config(const config_row *config, const AlgorithmEntry 
                 }
 
                 size_t result = adapter->get_result();
+                uint64_t result_hash = adapter->get_result_hash != NULL ? adapter->get_result_hash() : 0;
                 info = adapter->free_outputs();
                 if (info != GrB_SUCCESS) {
                     fprintf(stderr, "LAGraph failure in free_outputs for |S|=%zu chunk=%zu: %d\n", source_size, chunk,
@@ -389,8 +393,8 @@ static int run_experiment_config(const config_row *config, const AlgorithmEntry 
                 sum += elapsed;
                 measured++;
 
-                save_result(algo->name, config->grammar, config->graph, source_size, chunk, result, max_memory_kb,
-                            elapsed);
+                save_result(algo->name, config->grammar, config->graph, source_size, chunk, result, result_hash,
+                            max_memory_kb, elapsed);
                 malloc_trim(0);
             }
 
@@ -465,6 +469,7 @@ int main(int argc, char **argv) {
     size_t chunks_count = DEFAULT_CHUNKS_COUNT;
     unsigned int experiment_seed = DEFAULT_EXPERIMENT_SEED;
     char *results_file = NULL;
+    char *rsm_lib = NULL;
 
     AdapterMethods adapter = {0};
 
@@ -480,6 +485,7 @@ int main(int argc, char **argv) {
         {"chunks", required_argument, 0, CHUNKS_OPTION},
         {"seed", required_argument, 0, SEED_OPTION},
         {"results-file", required_argument, 0, RESULTS_FILE_OPTION},
+        {"rsm-lib", required_argument, 0, RSM_LIB_OPTION},
         {0, 0, 0, 0},
     };
 
@@ -559,6 +565,9 @@ int main(int argc, char **argv) {
         case RESULTS_FILE_OPTION:
             results_file = optarg;
             break;
+        case RSM_LIB_OPTION:
+            rsm_lib = optarg;
+            break;
         case 't':
             is_test = true;
             break;
@@ -637,6 +646,11 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
+    if (rsm_lib != NULL && strcmp(algo->name, "CFL_CFPQ_RSM") != 0) {
+        fprintf(stderr, "--rsm-lib is only supported by CFL_CFPQ_RSM\n");
+        exit(EXIT_FAILURE);
+    }
+
     if (results_file != NULL) {
         set_result_file(results_file);
     }
@@ -645,6 +659,7 @@ int main(int argc, char **argv) {
         .optimizations = optimizations,
         .use_start_nodes = use_start_nodes,
         .use_cfpq = use_cfpq,
+        .rsm_lib = rsm_lib,
     };
 
     if (is_test && !compute_results && algo->is_multiple_source) {
@@ -814,9 +829,10 @@ int main(int argc, char **argv) {
             fflush(stdout);
 
             result = adapter.get_result();
+            uint64_t result_hash = adapter.get_result_hash != NULL ? adapter.get_result_hash() : 0;
             TRY(adapter.free_outputs());
-            save_result(algo->name, config.grammar, config.graph, run_source_size, j, result, max_memory_kb,
-                        end[j] - start[j]);
+            save_result(algo->name, config.grammar, config.graph, run_source_size, j, result, result_hash,
+                        max_memory_kb, end[j] - start[j]);
             // in some cases free don't change memory usage, so we need to reset it manually
             malloc_trim(0);
         }

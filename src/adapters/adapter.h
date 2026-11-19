@@ -73,6 +73,7 @@
 #include "parser.h"
 #include <GraphBLAS.h>
 #include <LAGraph.h>
+#include <stdint.h>
 
 typedef enum ResultType {
     RESULT_OK,
@@ -173,6 +174,16 @@ typedef ResultType (*AdapterIsResultValid)(size_t valid_result);
 typedef size_t (*AdapterGetResult)(void);
 
 /**
+ * @brief Optional function pointer type for an order-independent result hash.
+ *
+ * Used by the CFPQ RSM lab to compare the exact reachable set of different
+ * variants. Adapters that do not implement it leave the pointer NULL.
+ *
+ * @return 64-bit hash of the result, or 0 when unavailable
+ */
+typedef uint64_t (*AdapterGetResultHash)(void);
+
+/**
  * @brief Adapter method table.
  *
  * This struct contains function pointers for all adapter operations.
@@ -212,4 +223,7 @@ typedef struct AdapterMethods {
 
     /** Get algorithm result */
     AdapterGetResult get_result;
+
+    /** Optional exact-result hash (NULL when the adapter does not provide one) */
+    AdapterGetResultHash get_result_hash;
 } AdapterMethods;

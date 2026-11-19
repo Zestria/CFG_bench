@@ -8,6 +8,8 @@
 #include "adapter_CFL_multsrc_common.h"
 #include "parser.h"
 #include "rsm_file.h"
+#include <dlfcn.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -34,6 +36,61 @@ typedef struct {
 
 static state_t state;
 
+// optional shared library loaded with --rsm-lib; when present its
+// LAGraph_CFPQ_RSM replaces the one from liblagraphx
+typedef int (*cfpq_rsm_fn)(GrB_Vector *, const RSM *, const GrB_Matrix *, const GrB_Index *, size_t, GrB_Index, char *);
+static void *variant_lib = NULL;
+static cfpq_rsm_fn variant_run = NULL;
+
+// order-independent hash of the reachable set, used by the lab runner
+static uint64_t result_hash = 0;
+
+static uint64_t splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+static uint64_t hash_reachable(GrB_Vector reachable) {
+    GrB_Index nvals = 0;
+    if (GrB_Vector_nvals(&nvals, reachable) != GrB_SUCCESS) {
+        return 0;
+    }
+
+    uint64_t hash = splitmix64((uint64_t)nvals);
+    if (nvals == 0) {
+        return hash;
+    }
+
+    GrB_Index *indices = malloc((size_t)nvals * sizeof(*indices));
+    bool *values = malloc((size_t)nvals * sizeof(*values));
+    if (indices == NULL || values == NULL) {
+        free(indices);
+        free(values);
+        return 0;
+    }
+
+    GrB_Index count = nvals;
+    if (GrB_Vector_extractTuples_BOOL(indices, values, &count, reachable) != GrB_SUCCESS) {
+        free(indices);
+        free(values);
+        return 0;
+    }
+
+    // XOR is order-independent, so the hash does not depend on the
+    // GraphBLAS tuple extraction order.
+    for (GrB_Index i = 0; i < count; i++) {
+        if (values[i]) {
+            hash ^= splitmix64((uint64_t)indices[i]);
+        }
+    }
+
+    free(indices);
+    free(values);
+    return hash;
+}
+
 static GrB_Info adapter_CFL_setup(void) {
     TRY(LAGr_Init(GrB_NONBLOCKING, malloc, NULL, NULL, free, state.msg));
 
@@ -48,6 +105,28 @@ static GrB_Info adapter_CFL_setup(void) {
 // adapter_CFL_prepare should be called just once for each config
 static GrB_Info adapter_CFL_prepare(const ParserResult *parser_result, void *prepare_data) {
     CFL_CFPQ_RSM_PrepareData *data = (CFL_CFPQ_RSM_PrepareData *)prepare_data;
+
+    if (variant_lib != NULL) {
+        dlclose(variant_lib);
+        variant_lib = NULL;
+        variant_run = NULL;
+    }
+    if (data != NULL && data->rsm_lib != NULL) {
+        variant_lib = dlopen(data->rsm_lib, RTLD_NOW | RTLD_LOCAL);
+        if (variant_lib == NULL) {
+            fprintf(stderr, "failed to load RSM variant library %s: %s\n", data->rsm_lib, dlerror());
+            return GrB_INVALID_VALUE;
+        }
+        void *symbol = dlsym(variant_lib, "LAGraph_CFPQ_RSM");
+        if (symbol == NULL) {
+            fprintf(stderr, "LAGraph_CFPQ_RSM not found in %s: %s\n", data->rsm_lib, dlerror());
+            dlclose(variant_lib);
+            variant_lib = NULL;
+            return GrB_INVALID_VALUE;
+        }
+        memcpy(&variant_run, &symbol, sizeof(symbol));
+    }
+
     ParserResult working_copy = parser_result_copy(parser_result);
     Grammar *grammar = &working_copy.grammar;
     Graph *graph = &working_copy.graph;
@@ -146,8 +225,17 @@ static GrB_Info adapter_CFL_init_outputs(void) {
 //
 // this should be called after adapter_CFL_adv_init_outputs
 static GrB_Info adapter_CFL_run(void) {
-    TRY(LAGraph_CFPQ_RSM(state.reachable, &state.rsm, state.adj_matrices, state.sources, state.sources_num, state.V,
-                         state.msg));
+    int info = variant_run != NULL ? variant_run(state.reachable, &state.rsm, state.adj_matrices, state.sources,
+                                                 state.sources_num, state.V, state.msg)
+                                   : LAGraph_CFPQ_RSM(state.reachable, &state.rsm, state.adj_matrices, state.sources,
+                                                      state.sources_num, state.V, state.msg);
+    if (info != GrB_SUCCESS) {
+        return info;
+    }
+
+    // The algorithm leaves the final GrB_mxv pending. Wait for it here so the
+    // benchmark timer includes the materialization of the result.
+    TRY(GrB_Vector_wait(*state.reachable, GrB_MATERIALIZE));
 
     return GrB_SUCCESS;
 }
@@ -167,8 +255,11 @@ static ResultType adapter_CFL_is_result_valid(size_t valid_result) {
 static size_t adapter_CFL_get_result(void) {
     GrB_Index result = 0;
     TRY(GrB_Vector_nvals(&result, *state.reachable));
+    result_hash = hash_reachable(*state.reachable);
     return result;
 }
+
+static uint64_t adapter_CFL_get_result_hash(void) { return result_hash; }
 
 // free output matrices
 //
@@ -189,11 +280,22 @@ static GrB_Info adapter_CFL_cleanup(void) {
     state.sources = NULL;
     state.sources_num = 0;
 
+    if (variant_lib != NULL) {
+        dlclose(variant_lib);
+        variant_lib = NULL;
+        variant_run = NULL;
+    }
+
     return GrB_SUCCESS;
 }
 
 // free LAGraph\GraphBLAS resources
 static GrB_Info adapter_CFL_teardown(void) {
+    if (variant_lib != NULL) {
+        dlclose(variant_lib);
+        variant_lib = NULL;
+        variant_run = NULL;
+    }
     TRY(LAGraph_Finalize(state.msg));
     return GrB_SUCCESS;
 }
@@ -208,6 +310,7 @@ AdapterMethods adapter_CFL_CFPQ_RSM_get_methods(void) {
                               .prepare = adapter_CFL_prepare,
                               .cleanup = adapter_CFL_cleanup,
                               .is_result_valid = adapter_CFL_is_result_valid,
-                              .get_result = adapter_CFL_get_result};
+                              .get_result = adapter_CFL_get_result,
+                              .get_result_hash = adapter_CFL_get_result_hash};
     return methods;
 }

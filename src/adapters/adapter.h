@@ -226,4 +226,7 @@ typedef struct AdapterMethods {
 
     /** Optional exact-result hash (NULL when the adapter does not provide one) */
     AdapterGetResultHash get_result_hash;
+
+    /** Optional post-run transfer of a Boolean destination vector to the caller. */
+    GrB_Info (*take_destinations)(GrB_Vector *destinations);
 } AdapterMethods;

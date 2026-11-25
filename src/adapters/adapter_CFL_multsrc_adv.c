@@ -181,15 +181,23 @@ static ResultType adapter_CFL_multsrc_adv_is_result_valid(size_t valid_result) {
     return RESULT_UNKNOWN;
 }
 
-// the number of vertices reachable from at least one source
-static size_t adapter_CFL_multsrc_adv_get_result(void) {
+static GrB_Info adapter_CFL_multsrc_adv_take_destinations(GrB_Vector *reachable) {
     GrB_Index size = 0;
     TRY(GrB_Matrix_ncols(&size, state.output));
 
     // reachable(v) = true <=> output(s, v) for some source s
+    TRY(GrB_Vector_new(reachable, GrB_BOOL, size));
+    return GrB_Matrix_reduce_Monoid(*reachable, NULL, NULL, GrB_LOR_MONOID_BOOL, state.output, GrB_DESC_T0);
+}
+
+// the number of vertices reachable from at least one source
+static size_t adapter_CFL_multsrc_adv_get_result(void) {
     GrB_Vector reachable = NULL;
-    TRY(GrB_Vector_new(&reachable, GrB_BOOL, size));
-    TRY(GrB_Matrix_reduce_Monoid(reachable, NULL, NULL, GrB_LOR_MONOID_BOOL, state.output, GrB_DESC_T0));
+    GrB_Info info = adapter_CFL_multsrc_adv_take_destinations(&reachable);
+    if (info != GrB_SUCCESS) {
+        GrB_Vector_free(&reachable);
+        TRY(info);
+    }
 
     GrB_Index result = 0;
     TRY(GrB_Vector_nvals(&result, reachable));
@@ -234,6 +242,7 @@ AdapterMethods adapter_CFL_multsrc_adv_get_methods(void) {
                               .prepare = adapter_CFL_multsrc_adv_prepare,
                               .cleanup = adapter_CFL_multsrc_adv_cleanup,
                               .is_result_valid = adapter_CFL_multsrc_adv_is_result_valid,
+                              .take_destinations = adapter_CFL_multsrc_adv_take_destinations,
                               .get_result = adapter_CFL_multsrc_adv_get_result};
     return methods;
 }

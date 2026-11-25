@@ -97,6 +97,7 @@ void print_list(SymbolList list, size_t *map) {
 #define OPT_FORMAT (1 << 1)
 #define OPT_LAZY (1 << 2)
 #define OPT_BLOCK (1 << 3)
+#define ALL_OPTIMIZATIONS (OPT_EMPTY | OPT_FORMAT | OPT_LAZY | OPT_BLOCK)
 
 enum {
     HOT_OPTION = 1000,
@@ -110,7 +111,8 @@ enum {
     CHUNKS_OPTION = 1008,
     SEED_OPTION = 1009,
     RESULTS_FILE_OPTION = 1010,
-    RSM_LIB_OPTION = 1011
+    RSM_LIB_OPTION = 1011,
+    COMPARE_RSM_OPTION
 };
 
 // the random start vertices are the same for every run
@@ -135,6 +137,8 @@ static void print_usage(const char *program_name) {
             "                    ones for every run\n"
             "  --experiment      Measure a multiple-source algorithm on source chunks from the\n"
             "                    start vertices file (implies --use-start-nodes)\n"
+            "  --compare-rsm     In --experiment with CFL_multsrc_adv -efbl, run --rsm-lib\n"
+            "                    after CFL on every source chunk using the same timing code.\n"
             "  --source-sizes <list>\n"
             "                    Comma-separated source set sizes (default: 1,10,100)\n"
             "  --chunks <n>      Number of source chunks per size (default: 30)\n"
@@ -142,7 +146,7 @@ static void print_usage(const char *program_name) {
             "  --results-file <path>\n"
             "                    Write results to this CSV file instead of results/results_<time>.csv\n"
             "  --rsm-lib <path>  Load LAGraph_CFPQ_RSM from this shared library instead of\n"
-            "                    liblagraphx (CFL_CFPQ_RSM only)\n"
+            "                    liblagraphx (CFL_CFPQ_RSM or --compare-rsm)\n"
             "  -a <algorithm>    Algorithm to use (default: " DEFAULT_ALGORITHM "; options: ",
             program_name);
     registry_print_names(stderr);
@@ -201,11 +205,11 @@ static void choose_random_start_nodes(ParserResult *parser_result, size_t percen
     parser_result->start_nodes_count = count;
 }
 
-static void shuffle_start_nodes(GrB_Index *nodes, size_t count, unsigned int seed) {
+static void shuffle_start_nodes(GrB_Index *nodes, size_t count, unsigned int *seed) {
     // Fisher-Yates shuffle, so the same seed and the same candidate file give
     // the same chunks for every algorithm
     for (size_t i = count; i > 1; i--) {
-        size_t j = (size_t)rand_r(&seed) % i;
+        size_t j = (size_t)rand_r(seed) % i;
         GrB_Index swap = nodes[i - 1];
         nodes[i - 1] = nodes[j];
         nodes[j] = swap;
@@ -274,145 +278,202 @@ static size_t *parse_source_sizes(const char *arg, size_t *out_count) {
     return sizes;
 }
 
-// Runs a multiple-source algorithm on shuffled source chunks. The candidate
-// pool is parser_result->start_nodes, loaded from the config's fourth column.
-// For every chunk the adapter is prepared from scratch, then one warm-up run
-// and rounds_count measured runs are performed.
-static int run_experiment_config(const config_row *config, const AlgorithmEntry *algo, AdapterMethods *adapter,
+// Compare the untimed Boolean reachability vectors using one reference per source chunk.
+static GrB_Info check_experiment_destinations(const AdapterMethods *adapter, GrB_Vector *reference, size_t *result) {
+    GrB_Vector actual = NULL;
+    GrB_Info info = adapter->take_destinations(&actual);
+    GrB_Index count = 0;
+    if (info == GrB_SUCCESS) {
+        info = GrB_Vector_nvals(&count, actual);
+    }
+    if (info == GrB_SUCCESS) {
+        *result = count;
+        if (*reference == NULL) {
+            *reference = actual;
+            actual = NULL;
+        } else {
+            bool same = false;
+            info = LAGraph_Vector_IsEqual(&same, *reference, actual, msg);
+            if (info == GrB_SUCCESS && !same) {
+                fprintf(stderr, "Reachable destination sets differ\n");
+                info = GrB_INVALID_VALUE;
+            }
+        }
+    }
+    GrB_free(&actual);
+    return info;
+}
+
+// Shared by standalone and paired runs, including preparation and the timed region.
+static int run_experiment_chunk(const config_row *config, const AlgorithmEntry *algo, const AdapterMethods *adapter,
+                                const AlgorithmOptions *algo_options, const ParserResult *parser_result,
+                                size_t rounds_count, bool is_hot_enabled, size_t source_size, size_t chunk,
+                                size_t chunks_count, GrB_Vector *reference) {
+    GrB_Info info = algo->prepare(adapter, parser_result, algo_options);
+
+    if (info != GrB_SUCCESS) {
+        fprintf(stderr, "LAGraph failure while preparing |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
+        return EXIT_FAILURE;
+    }
+
+    bool is_hot = is_hot_enabled;
+    size_t measured = 0;
+    double sum = 0.0;
+
+    while (measured < rounds_count) {
+        info = adapter->init_outputs();
+        if (info != GrB_SUCCESS) {
+            fprintf(stderr, "LAGraph failure in init_outputs for |S|=%zu chunk=%zu: %d\n", source_size, chunk,
+                    info);
+            adapter->cleanup();
+            return EXIT_FAILURE;
+        }
+
+        // in some cases free don't change memory usage, so we need to reset it manually
+        malloc_trim(0);
+        if (mem_peak_reset() != 0) {
+            fprintf(stderr, "Failed to reset memory peak\n");
+            adapter->free_outputs();
+            adapter->cleanup();
+            return EXIT_FAILURE;
+        }
+
+        double start_time = LAGraph_WallClockTime();
+        info = adapter->run();
+        double end_time = LAGraph_WallClockTime();
+        ssize_t max_memory_kb = mem_get_peak_kb();
+
+        if (info != GrB_SUCCESS) {
+            fprintf(stderr, "LAGraph failure in run for |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
+            adapter->free_outputs();
+            adapter->cleanup();
+            return EXIT_FAILURE;
+        }
+
+        if (is_hot) {
+            is_hot = false;
+            info = adapter->free_outputs();
+            if (info != GrB_SUCCESS) {
+                fprintf(stderr, "LAGraph failure in free_outputs for |S|=%zu chunk=%zu: %d\n", source_size,
+                        chunk, info);
+                adapter->cleanup();
+                return EXIT_FAILURE;
+            }
+            continue;
+        }
+
+        // Keep the standard result hash for RSM and avoid a second CFL reduction in paired runs.
+        size_t result = 0;
+        if (reference == NULL || adapter->get_result_hash != NULL) {
+            result = adapter->get_result();
+        }
+        if (reference != NULL) {
+            info = check_experiment_destinations(adapter, reference, &result);
+            if (info != GrB_SUCCESS) {
+                fprintf(stderr, "%s: %s result check failed for |S|=%zu chunk=%zu: %d\n",
+                        config->graph, algo->name, source_size, chunk, info);
+                adapter->free_outputs();
+                adapter->cleanup();
+                return EXIT_FAILURE;
+            }
+        }
+        uint64_t result_hash = adapter->get_result_hash != NULL ? adapter->get_result_hash() : 0;
+        info = adapter->free_outputs();
+        if (info != GrB_SUCCESS) {
+            fprintf(stderr, "LAGraph failure in free_outputs for |S|=%zu chunk=%zu: %d\n", source_size, chunk,
+                    info);
+            adapter->cleanup();
+            return EXIT_FAILURE;
+        }
+
+        double elapsed = end_time - start_time;
+        sum += elapsed;
+        measured++;
+
+        save_result(algo->name, config->grammar, config->graph, source_size, chunk, result, result_hash,
+                    max_memory_kb, elapsed);
+        malloc_trim(0);
+    }
+
+    info = adapter->cleanup();
+    if (info != GrB_SUCCESS) {
+        fprintf(stderr, "LAGraph failure in cleanup for |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
+        return EXIT_FAILURE;
+    }
+
+    printf("\t|S|=%zu chunk=%zu/%zu: %.6f s (avg of %zu runs)\n", source_size, chunk + 1, chunks_count,
+           sum / (double)measured, measured);
+    fflush(stdout);
+    return EXIT_SUCCESS;
+}
+
+static int run_experiment_config(const config_row *config, const AlgorithmEntry *algo, const AdapterMethods *adapter,
+                                 const AlgorithmEntry *rsm, const AdapterMethods *rsm_adapter,
                                  const AlgorithmOptions *algo_options, ParserResult *parser_result, size_t rounds_count,
                                  bool is_hot_enabled, const size_t *source_sizes, size_t source_sizes_count,
                                  size_t chunks_count, unsigned int seed) {
-    if (parser_result->start_nodes == NULL || parser_result->start_nodes_count == 0) {
+    GrB_Index *pool = parser_result->start_nodes;
+    size_t pool_count = parser_result->start_nodes_count;
+    if (pool == NULL || pool_count == 0) {
         fprintf(stderr, "Experiment mode requires a non-empty start vertices file (config row: %s)\n",
                 config->start_nodes_path == NULL ? "<none>" : config->start_nodes_path);
         return EXIT_FAILURE;
     }
-
-    GrB_Index *pool = parser_result->start_nodes;
-    size_t pool_count = parser_result->start_nodes_count;
-    shuffle_start_nodes(pool, pool_count, seed);
-
-    size_t max_source_size = 0;
     for (size_t i = 0; i < source_sizes_count; i++) {
-        if (source_sizes[i] > max_source_size) {
-            max_source_size = source_sizes[i];
+        if (source_sizes[i] > pool_count) {
+            fprintf(stderr, "%s: cannot draw %zu distinct vertices from a pool of %zu\n", config->graph,
+                    source_sizes[i], pool_count);
+            return EXIT_FAILURE;
         }
     }
 
-    GrB_Index *chunk_nodes = malloc(max_source_size * sizeof(*chunk_nodes));
-    if (chunk_nodes == NULL) {
-        fprintf(stderr, "Failed to allocate memory for source chunk\n");
-        return EXIT_FAILURE;
-    }
-
-    for (size_t size_index = 0; size_index < source_sizes_count; size_index++) {
-        size_t source_size = source_sizes[size_index];
-
+    shuffle_start_nodes(pool, pool_count, &seed);
+    GrB_Index *reshuffled = NULL;
+    int status = EXIT_SUCCESS;
+    for (size_t i = 0; i < source_sizes_count && status == EXIT_SUCCESS; i++) {
+        size_t size = source_sizes[i];
+        GrB_Index *current_pool = pool;
+        unsigned int shuffle_seed = seed;
+        size_t offset = 0;
         for (size_t chunk = 0; chunk < chunks_count; chunk++) {
-            size_t offset = chunk * source_size;
-            for (size_t i = 0; i < source_size; i++) {
-                // cycle through the shuffled pool when it is smaller than
-                // chunks_count * source_size; this keeps exactly 30 chunks
-                chunk_nodes[i] = pool[(offset + i) % pool_count];
-            }
-
-            parser_result->start_nodes = chunk_nodes;
-            parser_result->start_nodes_count = source_size;
-            GrB_Info info = algo->prepare(adapter, parser_result, algo_options);
-            parser_result->start_nodes = pool;
-            parser_result->start_nodes_count = pool_count;
-
-            if (info != GrB_SUCCESS) {
-                fprintf(stderr, "LAGraph failure while preparing |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
-                free(chunk_nodes);
-                return EXIT_FAILURE;
-            }
-
-            bool is_hot = is_hot_enabled;
-            size_t measured = 0;
-            double sum = 0.0;
-
-            while (measured < rounds_count) {
-                info = adapter->init_outputs();
-                if (info != GrB_SUCCESS) {
-                    fprintf(stderr, "LAGraph failure in init_outputs for |S|=%zu chunk=%zu: %d\n", source_size, chunk,
-                            info);
-                    adapter->cleanup();
-                    free(chunk_nodes);
-                    return EXIT_FAILURE;
-                }
-
-                // in some cases free don't change memory usage, so we need to reset it manually
-                malloc_trim(0);
-                if (mem_peak_reset() != 0) {
-                    fprintf(stderr, "Failed to reset memory peak\n");
-                    adapter->free_outputs();
-                    adapter->cleanup();
-                    free(chunk_nodes);
-                    return EXIT_FAILURE;
-                }
-
-                double start_time = LAGraph_WallClockTime();
-                info = adapter->run();
-                double end_time = LAGraph_WallClockTime();
-                ssize_t max_memory_kb = mem_get_peak_kb();
-
-                if (info != GrB_SUCCESS) {
-                    fprintf(stderr, "LAGraph failure in run for |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
-                    adapter->free_outputs();
-                    adapter->cleanup();
-                    free(chunk_nodes);
-                    return EXIT_FAILURE;
-                }
-
-                if (is_hot) {
-                    is_hot = false;
-                    info = adapter->free_outputs();
-                    if (info != GrB_SUCCESS) {
-                        fprintf(stderr, "LAGraph failure in free_outputs for |S|=%zu chunk=%zu: %d\n", source_size,
-                                chunk, info);
-                        adapter->cleanup();
-                        free(chunk_nodes);
+            // Consume complete blocks from each permutation before starting another pass.
+            if (offset > pool_count - size) {
+                if (reshuffled == NULL) {
+                    reshuffled = malloc(pool_count * sizeof(*reshuffled));
+                    if (reshuffled == NULL) {
+                        fprintf(stderr, "Failed to allocate a pool for reshuffling\n");
                         return EXIT_FAILURE;
                     }
-                    continue;
                 }
-
-                size_t result = adapter->get_result();
-                uint64_t result_hash = adapter->get_result_hash != NULL ? adapter->get_result_hash() : 0;
-                info = adapter->free_outputs();
-                if (info != GrB_SUCCESS) {
-                    fprintf(stderr, "LAGraph failure in free_outputs for |S|=%zu chunk=%zu: %d\n", source_size, chunk,
-                            info);
-                    adapter->cleanup();
-                    free(chunk_nodes);
-                    return EXIT_FAILURE;
+                if (current_pool == pool) {
+                    memcpy(reshuffled, pool, pool_count * sizeof(*reshuffled));
+                    current_pool = reshuffled;
                 }
-
-                double elapsed = end_time - start_time;
-                sum += elapsed;
-                measured++;
-
-                save_result(algo->name, config->grammar, config->graph, source_size, chunk, result, result_hash,
-                            max_memory_kb, elapsed);
-                malloc_trim(0);
+                shuffle_start_nodes(current_pool, pool_count, &shuffle_seed);
+                offset = 0;
             }
 
-            info = adapter->cleanup();
-            if (info != GrB_SUCCESS) {
-                fprintf(stderr, "LAGraph failure in cleanup for |S|=%zu chunk=%zu: %d\n", source_size, chunk, info);
-                free(chunk_nodes);
-                return EXIT_FAILURE;
+            ParserResult query = *parser_result;
+            query.start_nodes = current_pool + offset;
+            query.start_nodes_count = size;
+            offset += size;
+            GrB_Vector reference = NULL;
+            status = run_experiment_chunk(config, algo, adapter, algo_options, &query, rounds_count, is_hot_enabled,
+                                          size, chunk, chunks_count, rsm != NULL ? &reference : NULL);
+            if (status == EXIT_SUCCESS && rsm != NULL) {
+                status = run_experiment_chunk(config, rsm, rsm_adapter, algo_options, &query, rounds_count,
+                                              is_hot_enabled, size, chunk, chunks_count, &reference);
             }
-
-            printf("\t|S|=%zu chunk=%zu/%zu: %.6f s (avg of %zu runs)\n", source_size, chunk + 1, chunks_count,
-                   sum / (double)measured, measured);
-            fflush(stdout);
+            if (reference != NULL) {
+                GrB_free(&reference);
+            }
+            if (status != EXIT_SUCCESS) {
+                break;
+            }
         }
     }
-
-    free(chunk_nodes);
-    return EXIT_SUCCESS;
+    free(reshuffled);
+    return status;
 }
 
 // runs CFL_adv with all optimizations on the same data and returns the result "algo" must have
@@ -459,6 +520,7 @@ int main(int argc, char **argv) {
     size_t rounds_count = 10;
     bool use_cfpq = false;
     bool experiment = false;
+    bool compare_rsm = false;
     size_t default_source_sizes[] = {1, 10, 100};
     size_t *source_sizes = default_source_sizes;
     size_t source_sizes_count = sizeof(default_source_sizes) / sizeof(default_source_sizes[0]);
@@ -481,6 +543,7 @@ int main(int argc, char **argv) {
         {"compute-results", no_argument, 0, COMPUTE_RESULTS_OPTION},
         {"use-random-percent", required_argument, 0, USE_RANDOM_PERCENT_OPTION},
         {"experiment", no_argument, 0, EXPERIMENT_OPTION},
+        {"compare-rsm", no_argument, 0, COMPARE_RSM_OPTION},
         {"source-sizes", required_argument, 0, SOURCE_SIZES_OPTION},
         {"chunks", required_argument, 0, CHUNKS_OPTION},
         {"seed", required_argument, 0, SEED_OPTION},
@@ -527,6 +590,9 @@ int main(int argc, char **argv) {
             break;
         case EXPERIMENT_OPTION:
             experiment = true;
+            break;
+        case COMPARE_RSM_OPTION:
+            compare_rsm = true;
             break;
         case SOURCE_SIZES_OPTION:
             if (source_sizes_allocated) {
@@ -646,9 +712,21 @@ int main(int argc, char **argv) {
         exit(EXIT_FAILURE);
     }
 
-    if (rsm_lib != NULL && strcmp(algo->name, "CFL_CFPQ_RSM") != 0) {
-        fprintf(stderr, "--rsm-lib is only supported by CFL_CFPQ_RSM\n");
+    if (compare_rsm && (!experiment || strcmp(algo->name, "CFL_multsrc_adv") != 0 || rsm_lib == NULL ||
+                        optimizations != ALL_OPTIMIZATIONS)) {
+        fprintf(stderr, "--compare-rsm requires --experiment -a CFL_multsrc_adv -efbl and --rsm-lib\n");
         exit(EXIT_FAILURE);
+    }
+
+    if (rsm_lib != NULL && !compare_rsm && strcmp(algo->name, "CFL_CFPQ_RSM") != 0) {
+        fprintf(stderr, "--rsm-lib is only supported by CFL_CFPQ_RSM and --compare-rsm\n");
+        exit(EXIT_FAILURE);
+    }
+
+    const AlgorithmEntry *rsm = compare_rsm ? registry_find("CFL_CFPQ_RSM") : NULL;
+    AdapterMethods rsm_adapter = {0};
+    if (rsm != NULL) {
+        rsm_adapter = rsm->get_methods();
     }
 
     if (results_file != NULL) {
@@ -669,6 +747,7 @@ int main(int argc, char **argv) {
                 algo->name);
     }
 
+    // Both adapters use the same process-wide GraphBLAS context.
     TRY(adapter.setup());
 
     if (!is_config) {
@@ -699,8 +778,9 @@ int main(int argc, char **argv) {
 
         if (experiment) {
             int experiment_status =
-                run_experiment_config(&config, algo, &adapter, &algo_options, &parser_result, rounds_count,
-                                      is_hot_enabled, source_sizes, source_sizes_count, chunks_count, experiment_seed);
+                run_experiment_config(&config, algo, &adapter, rsm, &rsm_adapter, &algo_options, &parser_result,
+                                      rounds_count, is_hot_enabled, source_sizes, source_sizes_count, chunks_count,
+                                      experiment_seed);
             free_parser_result(&parser_result);
             if (experiment_status != EXIT_SUCCESS) {
                 has_test_failure = true;
@@ -747,8 +827,15 @@ int main(int argc, char **argv) {
             run_source_size = parser_result.start_nodes_count;
         }
 
-        algo->prepare(&adapter, &parser_result, &algo_options);
+        retval = algo->prepare(&adapter, &parser_result, &algo_options);
         free_parser_result(&parser_result);
+        if (retval != GrB_SUCCESS) {
+            fprintf(stderr, "%s: %s prepare failed: %d\n", config.graph, algo->name, retval);
+            free(start);
+            free(end);
+            has_test_failure = true;
+            break;
+        }
 
         bool is_hot = is_hot_enabled;
 
@@ -818,6 +905,14 @@ int main(int argc, char **argv) {
                 break;
             }
 
+            if (retval != GrB_SUCCESS) {
+                fprintf(stderr, "%s: %s run failed in %s%zu: %d\n", config.graph, algo->name,
+                        is_hot ? "warm-up before round " : "round ", j + 1, retval);
+                has_test_failure = true;
+                TRY(adapter.free_outputs());
+                break;
+            }
+
             if (is_hot) {
                 is_hot = false;
                 j--;
@@ -838,13 +933,16 @@ int main(int argc, char **argv) {
         }
         printf("\n");
 
-        if (is_test) {
+        if (is_test || has_test_failure) {
             free(start);
             free(end);
             adapter.cleanup();
 
-            fflush(stdout);
-            continue;
+            if (is_test) {
+                fflush(stdout);
+                continue;
+            }
+            break;
         }
 
         double sum = 0;

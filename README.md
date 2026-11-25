@@ -176,6 +176,95 @@ unzip CFPQ_eval.zip -d .
 The archive places its benchmark data in `data/`. It is not needed to run the
 included `configs/configs_my.csv` example.
 
+## Java Points-To campaign
+
+The `cfpq-rsm-variant-benchmarks` campaign uses all 21 Java graphs in the
+legacy archive. From the CFG_bench repository root, download the archive and
+extract its Java graph files. The matching CNF and RSM grammars are tracked.
+
+```bash
+curl --fail --location --retry 3 \
+  'https://drive.usercontent.google.com/download?id=12Qhc6XNXYbpPbZGp-lo30NsywFELAFhu&export=download&confirm=t' \
+  -o CFPQ_eval.zip
+unzip -n CFPQ_eval.zip 'data/graphs/java/*.g' -d .
+```
+
+The build expects sibling `GraphBLAS` and `LAGraph` clones. Use GraphBLAS
+`dev2` at `f09f234021` and LAGraph `java-points-to-rsm-vs-multsrc_adv` at
+`539a013e`. The LAGraph commit contains the `p1_full_clean` source. Build the
+Release libraries and compile the variant shared library with GCC 13+, CMake
+3.23+, GNU Make and Ninja. The runner needs Python 3.11+.
+
+```bash
+git -C ../GraphBLAS switch --detach f09f234021
+git -C ../LAGraph switch --detach 539a013e
+bash tools/build_java_points_to.sh
+```
+
+The build produces `build/java-points-to/p1_full_clean.so`, `cfg_bench` and
+`pairs_extractor`. Run the full campaign on the benchmark server.
+
+```bash
+run=results/java-points-to-server
+python3 tools/run_java_points_to.py prepare "$run"
+python3 tools/run_java_points_to.py paired "$run"
+python3 tools/run_java_points_to.py cfl "$run"
+python3 tools/run_java_points_to.py rsm "$run"
+```
+
+`prepare` uses the standard `pairs_extractor --start-only`. It saves each
+completed pool so the command can resume on the same directory. If the pools
+are already available, pass their directory with `prepare --reuse-candidates`.
+
+`paired` uses the standard CFG_bench `--experiment` timing path. For every
+source set it runs `CFL_multsrc_adv -efbl` with a warm-up and three measured
+rounds, then runs `CFL_CFPQ_RSM` with `p1_full_clean` on the same set and with
+the same repeat policy. An RSM win means its median time is at most the CFL
+median. The preparation and timing code is shared with the standalone runs.
+
+The standard CFL timer ends before its output matrix is reduced to a vector
+of destinations. The RSM adapter materializes its vector inside its timed
+call. The older `paired_experiment.c` included the CFL reduction in its
+timing, so the crossover can move between the two protocols.
+
+After the timer stops, the first measured CFL result provides the reference
+vector for the chunk. The remaining measured CFL and all measured RSM results
+must match it exactly. The check compares the stored vertex indices and
+Boolean values and stops on a mismatch. The single reference vector remains
+in memory during the chunk and can contribute to the process peak RSS.
+
+For each graph, the pilot tests sizes 10, 20, 30, … with 150 paired queries
+at each size. The first size with at least 135 RSM wins is tested on a fresh
+shuffle for the upper bound. That test needs at least 277 wins in 298
+queries. If it does not pass, increase the size by 3 and test again.
+Starting at `max(1, U - 10)`, the lower test needs 59 RSM losses in 474
+queries. If it does not pass, decrease the size by 5, testing 1 at the end
+if reached. A successful lower test at `b` and upper test at `U` give
+`[b+1,U]` under monotonicity. The report records when only an upper bound
+was established or when the search found no upper bound within the pool.
+
+These are the previous per-point binomial thresholds, planned at 5%
+significance with at least 90% joint power for RSM win probabilities of
+85% and 95% at the lower and upper points under independent trials. The
+adaptive search across points and the finite-pool sampling do not give a
+global 5% error guarantee. `points.csv` records every measured point and
+`intervals.csv` records the final status for each graph.
+
+The standalone `cfl` stage runs `CFL_adv -efbl` on each full graph with one
+warm-up and 30 measured repetitions. The `rsm` stage uses 385 source sets
+of size 100 per graph, each with a warm-up and three measured repetitions.
+CFG_bench draws complete blocks from a shuffled pool and reshuffles when
+the remaining vertices cannot fill the next block. That rule applies to
+all `--experiment` runs. It allows repeats across shuffles while each block
+from an extractor-generated pool contains distinct vertices. The count of
+385 uses the Cochran calculation for an independent proportion as a target
+sample size. It does not establish independence or a margin of error for
+median runtimes under this sampling scheme.
+
+Run timing stages sequentially. The launcher inherits the server's
+environment. Each stage prints its output directory and writes progress
+to `run.log`.
+
 ## Benchmark Configuration
 
 The benchmark reads its input set from a CSV file passed with `-c`:
@@ -345,9 +434,10 @@ from the config and `-t` prints a warning and `[Unknown]`.
 `--experiment` measures a multiple-source algorithm on several source sets. The
 fourth config column is then a candidate pool, normally produced by
 `pairs_extractor --start-only`. The pool is shuffled once per graph. For every
-`--source-sizes` value, consecutive chunks are taken from the start of that
-shuffled pool; if the pool is smaller than `chunks * |S|`, it is reused
-cyclically. Each chunk gets one warm-up run and `-r` measured runs.
+`--source-sizes` value, consecutive complete chunks are taken from the
+start of that shuffled pool. If the remaining pool cannot fill another
+chunk, the full pool is shuffled again before continuing. Each chunk gets
+one warm-up run with `--hot` and `-r` measured runs.
 
 `configs/experiment.csv` has no candidate files, so run the helper first; it
 extracts candidates, writes a config with the fourth column filled, runs all

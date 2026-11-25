@@ -73,10 +73,17 @@ void explode_indices_CFL(Grammar *grammar, Graph *graph, SymbolList *nonterms, S
                 continue;
             }
 
-            (*map)[i] = symbol_list_add_str(new_list, symbol_numerate(&sym, 0), sym.is_nonterm);
+            char *first_label = symbol_numerate(&sym, 0);
+            (*map)[i] = symbol_list_add_str(new_list, first_label, sym.is_nonterm);
+            if (first_label != sym.label) {
+                free(first_label);
+            }
             for (size_t j = 1; j < graph->block_count; j++) {
                 char *new_label = symbol_numerate(&sym, j);
                 symbol_list_add_str(new_list, new_label, sym.is_nonterm);
+                if (new_label != sym.label) {
+                    free(new_label);
+                }
             }
         }
     }

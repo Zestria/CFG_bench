@@ -261,6 +261,12 @@ static size_t adapter_CFL_get_result(void) {
 
 static uint64_t adapter_CFL_get_result_hash(void) { return result_hash; }
 
+static GrB_Info adapter_CFL_CFPQ_RSM_take_destinations(GrB_Vector *destinations) {
+    *destinations = *state.reachable;
+    *state.reachable = NULL;
+    return GrB_SUCCESS;
+}
+
 // free output matrices
 //
 // this should be called after each run of the algorithm
@@ -276,6 +282,7 @@ static GrB_Info adapter_CFL_free_outputs(void) {
 // this should be called after all runs of the algorithm for the given config
 static GrB_Info adapter_CFL_cleanup(void) {
     TRY(adapter_CFL_cleanup_common(&state.adj_matrices, state.rsm.terminal_count, (void **)NULL));
+    rsm_lagraph_rsm_free(&state.rsm);
     free(state.sources);
     state.sources = NULL;
     state.sources_num = 0;
@@ -311,6 +318,7 @@ AdapterMethods adapter_CFL_CFPQ_RSM_get_methods(void) {
                               .cleanup = adapter_CFL_cleanup,
                               .is_result_valid = adapter_CFL_is_result_valid,
                               .get_result = adapter_CFL_get_result,
+                              .take_destinations = adapter_CFL_CFPQ_RSM_take_destinations,
                               .get_result_hash = adapter_CFL_get_result_hash};
     return methods;
 }

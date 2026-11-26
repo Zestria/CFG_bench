@@ -9,7 +9,6 @@
 #include "parser.h"
 #include "rsm_file.h"
 #include <stdlib.h>
-#include <string.h>
 
 #define TRY(GrB_method)                                                                                                \
     {                                                                                                                  \
@@ -24,7 +23,7 @@
 // inner state of the adapter
 typedef struct {
     RSM rsm;
-    GrB_Vector *reachable;
+    GrB_Vector reachable;
     GrB_Matrix *adj_matrices;
     GrB_Index *sources;
     size_t sources_num;
@@ -39,6 +38,10 @@ static GrB_Info adapter_CFL_setup(void) {
     TRY(LAGr_Init(GrB_NONBLOCKING, malloc, NULL, NULL, free, state.msg));
 
     return GrB_SUCCESS;
+}
+
+static GrB_Info adapter_CFL_set_sources(const GrB_Index *sources, size_t count) {
+    return adapter_CFL_set_src_nodes_common(&state.sources, &state.sources_num, sources, count);
 }
 
 // prepare the adapter for use with the given parser result
@@ -108,22 +111,6 @@ static GrB_Info adapter_CFL_prepare(const ParserResult *parser_result, void *pre
     state.V = graph->node_count;
     state.batch_terminal_transitions = data->batch_terminal_transitions;
 
-    if (data->use_start_nodes) {
-        state.sources_num = parser_result->start_nodes_count;
-        state.sources = NULL;
-
-        if (state.sources_num > 0) {
-            state.sources = malloc(state.sources_num * sizeof(*state.sources));
-            if (state.sources == NULL) {
-                fprintf(stderr, "out of memory\n");
-                abort();
-            }
-            memcpy(state.sources, parser_result->start_nodes, state.sources_num * sizeof(*state.sources));
-        }
-    } else {
-        TRY(adapter_CFL_init_src_nodes_common(&state.sources, &state.sources_num, graph->node_count));
-    }
-
     free(row);
     free(col);
     GrB_free(&true_scalar);
@@ -133,14 +120,17 @@ static GrB_Info adapter_CFL_prepare(const ParserResult *parser_result, void *pre
     rsm_free(rsm);
     free_parser_result(&working_copy);
 
-    return GrB_SUCCESS;
+    if (data->use_start_nodes) {
+        return adapter_CFL_set_sources(parser_result->start_nodes, parser_result->start_nodes_count);
+    }
+    return adapter_CFL_init_src_nodes_common(&state.sources, &state.sources_num, state.V);
 }
 
 // initialize output matrices
 //
 // this should be called before each run of the algorithm
 static GrB_Info adapter_CFL_init_outputs(void) {
-    state.reachable = calloc(1, sizeof(GrB_Vector));
+    state.reachable = NULL;
     return GrB_SUCCESS;
 }
 
@@ -148,7 +138,7 @@ static GrB_Info adapter_CFL_init_outputs(void) {
 //
 // this should be called after adapter_CFL_adv_init_outputs
 static GrB_Info adapter_CFL_run(void) {
-    TRY(LAGraph_CFPQ_RSM(state.reachable, &state.rsm, state.adj_matrices, state.sources, state.sources_num, state.V,
+    TRY(LAGraph_CFPQ_RSM(&state.reachable, &state.rsm, state.adj_matrices, state.sources, state.sources_num, state.V,
                          state.batch_terminal_transitions, state.msg));
 
     return GrB_SUCCESS;
@@ -168,25 +158,29 @@ static ResultType adapter_CFL_is_result_valid(size_t valid_result) {
 // TODO: now this is the same as adapter_CFL_adv_is_result_valid, make this more generic for other adapters
 static size_t adapter_CFL_get_result(void) {
     GrB_Index result = 0;
-    TRY(GrB_Vector_nvals(&result, *state.reachable));
+    TRY(GrB_Vector_nvals(&result, state.reachable));
     return result;
+}
+
+static GrB_Info adapter_CFL_wait_outputs(void) { return GrB_Vector_wait(state.reachable, GrB_MATERIALIZE); }
+
+static GrB_Info adapter_CFL_take_destinations(GrB_Vector *destinations) {
+    *destinations = state.reachable;
+    state.reachable = NULL;
+    return GrB_SUCCESS;
 }
 
 // free output matrices
 //
 // this should be called after each run of the algorithm
-static GrB_Info adapter_CFL_free_outputs(void) {
-    TRY(GrB_free(state.reachable));
-    free(state.reachable);
-
-    return GrB_SUCCESS;
-}
+static GrB_Info adapter_CFL_free_outputs(void) { return GrB_Vector_free(&state.reachable); }
 
 // free all resources allocated by the adapter except outputs
 //
 // this should be called after all runs of the algorithm for the given config
 static GrB_Info adapter_CFL_cleanup(void) {
     TRY(adapter_CFL_cleanup_common(&state.adj_matrices, state.rsm.terminal_count, (void **)NULL));
+    rsm_lagraph_rsm_free(&state.rsm);
     free(state.sources);
     state.sources = NULL;
     state.sources_num = 0;
@@ -210,6 +204,9 @@ AdapterMethods adapter_CFL_CFPQ_RSM_get_methods(void) {
                               .prepare = adapter_CFL_prepare,
                               .cleanup = adapter_CFL_cleanup,
                               .is_result_valid = adapter_CFL_is_result_valid,
-                              .get_result = adapter_CFL_get_result};
+                              .get_result = adapter_CFL_get_result,
+                              .set_sources = adapter_CFL_set_sources,
+                              .wait_outputs = adapter_CFL_wait_outputs,
+                              .take_destinations = adapter_CFL_take_destinations};
     return methods;
 }

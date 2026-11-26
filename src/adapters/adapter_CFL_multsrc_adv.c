@@ -5,7 +5,6 @@
 #include "adapter_CFL_multsrc_common.h"
 #include "parser.h"
 #include <stdlib.h>
-#include <string.h>
 
 #define TRY(GrB_method)                                                                                                \
     {                                                                                                                  \
@@ -79,6 +78,10 @@ static GrB_Info adapter_CFL_multsrc_adv_setup(void) {
     return GrB_SUCCESS;
 }
 
+static GrB_Info adapter_CFL_multsrc_adv_set_sources(const GrB_Index *sources, size_t count) {
+    return adapter_CFL_set_src_nodes_common(&state.srcs, &state.source_count, sources, count);
+}
+
 // prepare the adapter for use with the given parser result
 // this may include converting the grammar and graph into a format suitable for the algorithm
 //
@@ -137,22 +140,9 @@ static GrB_Info adapter_CFL_multsrc_adv_prepare(const ParserResult *parser_resul
     state.graph_size = graph.node_count;
 
     if (data->use_start_nodes) {
-        state.source_count = parser_result->start_nodes_count;
-        state.srcs = NULL;
-
-        if (state.source_count > 0) {
-            state.srcs = malloc(state.source_count * sizeof(*state.srcs));
-            if (state.srcs == NULL) {
-                fprintf(stderr, "out of memory\n");
-                abort();
-            }
-            memcpy(state.srcs, parser_result->start_nodes, state.source_count * sizeof(*state.srcs));
-        }
-    } else {
-        TRY(adapter_CFL_init_src_nodes_common(&state.srcs, &state.source_count, state.graph_size));
+        return adapter_CFL_multsrc_adv_set_sources(parser_result->start_nodes, parser_result->start_nodes_count);
     }
-
-    return GrB_SUCCESS;
+    return adapter_CFL_init_src_nodes_common(&state.srcs, &state.source_count, state.graph_size);
 }
 
 // the algorithm creates the output matrix itself
@@ -181,16 +171,25 @@ static ResultType adapter_CFL_multsrc_adv_is_result_valid(size_t valid_result) {
     return RESULT_UNKNOWN;
 }
 
-// the number of vertices reachable from at least one source
-static size_t adapter_CFL_multsrc_adv_get_result(void) {
+static GrB_Info adapter_CFL_multsrc_adv_wait_outputs(void) { return GrB_Matrix_wait(state.output, GrB_MATERIALIZE); }
+
+static GrB_Info adapter_CFL_multsrc_adv_take_destinations(GrB_Vector *reachable) {
     GrB_Index size = 0;
     TRY(GrB_Matrix_ncols(&size, state.output));
 
     // reachable(v) = true <=> output(s, v) for some source s
-    GrB_Vector reachable = NULL;
-    TRY(GrB_Vector_new(&reachable, GrB_BOOL, size));
-    TRY(GrB_Matrix_reduce_Monoid(reachable, NULL, NULL, GrB_LOR_MONOID_BOOL, state.output, GrB_DESC_T0));
+    TRY(GrB_Vector_new(reachable, GrB_BOOL, size));
+    GrB_Info info = GrB_Matrix_reduce_Monoid(*reachable, NULL, NULL, GrB_LOR_MONOID_BOOL, state.output, GrB_DESC_T0);
+    if (info != GrB_SUCCESS) {
+        GrB_Vector_free(reachable);
+    }
+    return info;
+}
 
+// the number of vertices reachable from at least one source
+static size_t adapter_CFL_multsrc_adv_get_result(void) {
+    GrB_Vector reachable = NULL;
+    TRY(adapter_CFL_multsrc_adv_take_destinations(&reachable));
     GrB_Index result = 0;
     TRY(GrB_Vector_nvals(&result, reachable));
     TRY(GrB_Vector_free(&reachable));
@@ -214,6 +213,7 @@ static GrB_Info adapter_CFL_multsrc_adv_cleanup(void) {
     TRY(adapter_CFL_cleanup_common(&state.adj_matrices, state.symbols_amount, (void **)&state.rules));
     free(state.srcs);
     state.srcs = NULL;
+    state.source_count = 0;
 
     return GrB_SUCCESS;
 }
@@ -234,6 +234,9 @@ AdapterMethods adapter_CFL_multsrc_adv_get_methods(void) {
                               .prepare = adapter_CFL_multsrc_adv_prepare,
                               .cleanup = adapter_CFL_multsrc_adv_cleanup,
                               .is_result_valid = adapter_CFL_multsrc_adv_is_result_valid,
-                              .get_result = adapter_CFL_multsrc_adv_get_result};
+                              .get_result = adapter_CFL_multsrc_adv_get_result,
+                              .set_sources = adapter_CFL_multsrc_adv_set_sources,
+                              .wait_outputs = adapter_CFL_multsrc_adv_wait_outputs,
+                              .take_destinations = adapter_CFL_multsrc_adv_take_destinations};
     return methods;
 }

@@ -212,4 +212,9 @@ typedef struct AdapterMethods {
 
     /** Get algorithm result */
     AdapterGetResult get_result;
+
+    /** Optional operations for the paired experiment */
+    GrB_Info (*set_sources)(const GrB_Index *sources, size_t count);
+    GrB_Info (*wait_outputs)(void);
+    GrB_Info (*take_destinations)(GrB_Vector *destinations);
 } AdapterMethods;

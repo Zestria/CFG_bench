@@ -15,14 +15,15 @@ CI_RUN = ./$(TARGET) -t -c $(CI_CONFIG)
 CI_ADV_FLAGS := e f l b ef el eb fl fb lb efl efb elb flb eflb
 
 SRCS := $(wildcard $(SRC_DIR)/*.c) $(wildcard $(SRC_DIR)/adapters/*.c)
-MAIN_SRCS := $(SRC_DIR)/test.c $(SRC_DIR)/pairs_extractor.c
+BENCH_SRCS := $(SRC_DIR)/test.c $(SRC_DIR)/experiment.c
+MAIN_SRCS := $(BENCH_SRCS) $(SRC_DIR)/pairs_extractor.c
 LIB_SRCS := $(filter-out $(MAIN_SRCS),$(SRCS))
 
 .PHONY: all clean bench CI debug format hooks lint pairs-extractor test-explode-indices test-explode-indices-leaks test-rsm-file
 
 all: $(TARGET) $(PAIRS_EXTRACTOR_TARGET)
 
-$(TARGET): $(SRC_DIR)/test.c $(LIB_SRCS)
+$(TARGET): $(BENCH_SRCS) $(LIB_SRCS)
 	mkdir -p $(BUILD_DIR)
 	$(CC) $(CFLAGS) $(INCLUDES) $^ $(LDLIBS) -o $@
 

@@ -1,5 +1,6 @@
 #include "adapter_CFL_adv.h"
 #include "computed_cache.h"
+#include "experiment.h"
 #include "memory.h"
 #include "parser.h"
 #include "registry.h"
@@ -90,18 +91,18 @@ void print_list(SymbolList list, size_t *map) {
 // and vf.cnf grammar)
 #define configs_macro configs_java
 
-#define OPT_EMPTY (1 << 0)
-#define OPT_FORMAT (1 << 1)
-#define OPT_LAZY (1 << 2)
-#define OPT_BLOCK (1 << 3)
-
 enum {
     HOT_OPTION = 1000,
     BENCH_PARSE_OPTION = 1001,
     CFL_ALL_PATH_USE_CFPQ = 1002,
     USE_START_NODES_OPTION = 1003,
     COMPUTE_RESULTS_OPTION = 1004,
-    USE_RANDOM_PERCENT_OPTION = 1005
+    USE_RANDOM_PERCENT_OPTION = 1005,
+    EXPERIMENT_OPTION,
+    EXPERIMENT_SOURCE_SIZE_OPTION,
+    EXPERIMENT_CHUNKS_OPTION,
+    EXPERIMENT_SEED_OPTION,
+    EXPERIMENT_RESULTS_FILE_OPTION
 };
 
 // the random start vertices are the same for every run
@@ -133,6 +134,13 @@ static void print_usage(const char *program_name) {
             "  -f                Enable format optimization\n"
             "  -l                Enable lazy optimization\n"
             "  -b                Enable block optimization\n"
+            "\n"
+            "Paired experiment (one config row with an eligible pool in column four):\n"
+            "  --experiment      Run CFL_multsrc_adv -efbl then CFL_CFPQ_RSM -b for each query\n"
+            "  --source-size <s> Number of source draws per query\n"
+            "  --chunks <n>      Number of paired queries\n"
+            "  --seed <n>        Unsigned 64-bit sample seed\n"
+            "  --results-file <path> New CSV with three measurements per algorithm in nanoseconds\n"
             "\n"
             "Other:\n"
             "  -t                Enable test mode: run each config once and check the result\n"
@@ -222,7 +230,10 @@ int main(int argc, char **argv) {
     const AlgorithmEntry *algo = NULL;
     char *input_config = NULL;
     size_t rounds_count = 10;
+    bool rounds_specified = false;
     bool use_cfpq = false;
+    bool experiment = false;
+    ExperimentArgs experiment_args = {0};
 
     AdapterMethods adapter = {0};
 
@@ -233,6 +244,11 @@ int main(int argc, char **argv) {
         {"CFL-all-path-use-CFPQ-Core", no_argument, 0, CFL_ALL_PATH_USE_CFPQ},
         {"compute-results", no_argument, 0, COMPUTE_RESULTS_OPTION},
         {"use-random-percent", required_argument, 0, USE_RANDOM_PERCENT_OPTION},
+        {"experiment", no_argument, 0, EXPERIMENT_OPTION},
+        {"source-size", required_argument, 0, EXPERIMENT_SOURCE_SIZE_OPTION},
+        {"chunks", required_argument, 0, EXPERIMENT_CHUNKS_OPTION},
+        {"seed", required_argument, 0, EXPERIMENT_SEED_OPTION},
+        {"results-file", required_argument, 0, EXPERIMENT_RESULTS_FILE_OPTION},
         {0, 0, 0, 0},
     };
 
@@ -276,6 +292,7 @@ int main(int argc, char **argv) {
             is_test = true;
             break;
         case 'r':
+            rounds_specified = true;
             rounds_count = strtoul(optarg, NULL, 10);
             if (rounds_count == 0) {
                 fprintf(stderr, "Rounds count must be greater than 0\n");
@@ -301,10 +318,39 @@ int main(int argc, char **argv) {
         case CFL_ALL_PATH_USE_CFPQ:
             use_cfpq = true;
             break;
+        case EXPERIMENT_OPTION:
+            experiment = true;
+            break;
+        case EXPERIMENT_SOURCE_SIZE_OPTION:
+            experiment_args.source_size = optarg;
+            break;
+        case EXPERIMENT_CHUNKS_OPTION:
+            experiment_args.chunks = optarg;
+            break;
+        case EXPERIMENT_SEED_OPTION:
+            experiment_args.seed = optarg;
+            break;
+        case EXPERIMENT_RESULTS_FILE_OPTION:
+            experiment_args.results_file = optarg;
+            break;
         default:
             print_usage(argv[0]);
             exit(EXIT_FAILURE);
         }
+    }
+
+    if (experiment) {
+        if (algo != NULL || optimizations != 0 || rounds_specified || is_hot_enabled || is_test ||
+            is_bench_parse_enabled || use_start_nodes || random_percent > 0 || compute_results || use_cfpq ||
+            optind != argc) {
+            fprintf(stderr, "--experiment has fixed algorithms, optimizations and rounds; use its own options\n");
+            return EXIT_FAILURE;
+        }
+        return run_experiment(input_config, &experiment_args);
+    }
+    if (experiment_args.source_size || experiment_args.chunks || experiment_args.seed || experiment_args.results_file) {
+        fprintf(stderr, "--source-size, --chunks, --seed and --results-file require --experiment\n");
+        return EXIT_FAILURE;
     }
 
     if (compute_results && !is_test) {
@@ -401,8 +447,9 @@ int main(int argc, char **argv) {
             }
         }
 
-        algo->prepare(&adapter, &parser_result, &algo_options);
+        GrB_Info prepare_status = algo->prepare(&adapter, &parser_result, &algo_options);
         free_parser_result(&parser_result);
+        TRY(prepare_status);
 
         bool is_hot = is_hot_enabled;
 

@@ -8,6 +8,11 @@
 
 #define DEFAULT_ALGORITHM "CFL_adv"
 
+#define OPT_EMPTY (1 << 0)
+#define OPT_FORMAT (1 << 1)
+#define OPT_LAZY (1 << 2)
+#define OPT_BLOCK (1 << 3)
+
 // CLI options an algorithm may need in prepare
 typedef struct {
     int8_t optimizations;

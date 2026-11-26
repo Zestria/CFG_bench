@@ -1,4 +1,6 @@
-#include "GraphBLAS.h"
+#include "adapter_CFL_multsrc_common.h"
+#include <stdlib.h>
+#include <string.h>
 
 #define TRY(GrB_method)                                                                                                \
     {                                                                                                                  \
@@ -27,5 +29,26 @@ GrB_Info adapter_CFL_init_src_nodes_common(GrB_Index **srcs, size_t *source_coun
         (*srcs)[i] = i;
     }
 
+    return GrB_SUCCESS;
+}
+
+GrB_Info adapter_CFL_set_src_nodes_common(GrB_Index **srcs, size_t *source_count, const GrB_Index *sources,
+                                          size_t count) {
+    if (count == 0) {
+        free(*srcs);
+        *srcs = NULL;
+        *source_count = 0;
+        return GrB_SUCCESS;
+    }
+
+    if (count != *source_count) {
+        GrB_Index *copy = realloc(*srcs, count * sizeof(*copy));
+        if (copy == NULL) {
+            return GrB_OUT_OF_MEMORY;
+        }
+        *srcs = copy;
+        *source_count = count;
+    }
+    memcpy(*srcs, sources, count * sizeof(**srcs));
     return GrB_SUCCESS;
 }
